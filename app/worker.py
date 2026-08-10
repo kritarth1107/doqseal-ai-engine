@@ -13,6 +13,7 @@ from app.db.mongo import (
     mark_job_processing,
 )
 from app.pipeline.runner import run_extraction_pipeline
+from app.rag.indexer import index_extraction
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("doqseal.worker")
@@ -63,6 +64,19 @@ def process_job(job_id: str) -> None:
         extraction_payload.get("strategy"),
         extraction_payload.get("status"),
     )
+
+    try:
+        indexed = index_extraction(
+            organisation_id=organisation_id,
+            document_id=document_id,
+            job_id=job_id,
+            project_id=project_id,
+            ocr_full_text=extraction_payload.get("ocrFullText"),
+            extraction_data=extraction_payload.get("data"),
+        )
+        logger.info("RAG indexed %d chunks for job %s", indexed, job_id)
+    except Exception:
+        logger.exception("RAG indexing failed for job %s", job_id)
 
 
 def on_message(channel, method, _properties, body):

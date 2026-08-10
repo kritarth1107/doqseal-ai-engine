@@ -27,5 +27,15 @@ class Settings:
     ocr_languages: str = os.getenv("OCR_LANGUAGES", "en,hi")
     confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.75"))
 
+    # RAG indexing
+    qdrant_url: str = os.getenv("QDRANT_URL", "http://localhost:6333")
+    embedding_model: str = os.getenv(
+        "EMBEDDING_MODEL", "intfloat/multilingual-e5-base"
+    )
+
+    # Chat
+    ollama_url: str = os.getenv("OLLAMA_URL", "http://localhost:11434")
+    llm_model: str = os.getenv("LLM_MODEL", "qwen2.5:7b-instruct")
+
 
 settings = Settings()

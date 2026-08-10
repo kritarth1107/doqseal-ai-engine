@@ -1,0 +1,122 @@
+"""Chat tools — Qdrant retrieval and MongoDB document helpers."""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+import httpx
+
+from app.config import settings
+from app.db.mongo import get_db
+
+logger = logging.getLogger("doqseal.chat.tools")
+
+
+def _collection_name(organisation_id: str) -> str:
+    return f"org_{organisation_id}"
+
+
+def is_qdrant_available() -> bool:
+    try:
+        with httpx.Client(timeout=2.0) as client:
+            response = client.get(f"{settings.qdrant_url.rstrip('/')}/collections")
+            return response.status_code == 200
+    except Exception:
+        return False
+
+
+def _collection_exists(client: httpx.Client, organisation_id: str) -> bool:
+    response = client.get(
+        f"{settings.qdrant_url.rstrip('/')}/collections/{_collection_name(organisation_id)}"
+    )
+    return response.status_code == 200
+
+
+def search_documents(
+    organisation_id: str,
+    query: str,
+    *,
+    project_id: str | None = None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Retrieve relevant chunks from Qdrant when available; otherwise return []."""
+    if not query.strip():
+        return []
+
+    if not is_qdrant_available():
+        logger.info("Qdrant unavailable — skipping retrieval")
+        return []
+
+    collection = _collection_name(organisation_id)
+    base_url = settings.qdrant_url.rstrip("/")
+
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            if not _collection_exists(client, organisation_id):
+                logger.info("Qdrant collection %s not found", collection)
+                return []
+
+            scroll_filter: dict[str, Any] | None = None
+            if project_id:
+                scroll_filter = {
+                    "must": [{"key": "projectId", "match": {"value": project_id}}]
+                }
+
+            response = client.post(
+                f"{base_url}/collections/{collection}/points/scroll",
+                json={
+                    "limit": limit,
+                    "with_payload": True,
+                    "filter": scroll_filter,
+                },
+            )
+            response.raise_for_status()
+            points = response.json().get("result", {}).get("points", [])
+    except Exception as exc:
+        logger.warning("Qdrant retrieval failed: %s", exc)
+        return []
+
+    chunks: list[dict[str, Any]] = []
+    for point in points:
+        payload = point.get("payload") or {}
+        text = payload.get("text") or payload.get("chunk") or payload.get("content")
+        if not text:
+            continue
+        chunks.append(
+            {
+                "documentId": payload.get("documentId"),
+                "projectId": payload.get("projectId"),
+                "snippet": str(text)[:500],
+                "score": point.get("score"),
+            }
+        )
+
+    return chunks
+
+
+def get_extraction(document_id: str) -> dict[str, Any] | None:
+    db = get_db()
+    extraction = db.extractions.find_one({"documentId": document_id})
+    if not extraction:
+        return None
+    extraction.pop("_id", None)
+    return extraction
+
+
+def list_project_documents(
+    organisation_id: str,
+    project_id: str,
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    db = get_db()
+    cursor = (
+        db.documents.find(
+            {"organisationId": organisation_id, "projectId": project_id},
+            {"_id": 0, "documentId": 1, "originalFilename": 1, "createdAt": 1},
+        )
+        .sort("createdAt", -1)
+        .limit(limit)
+    )
+    return list(cursor)

@@ -1,0 +1,94 @@
+"""Upsert document chunks into per-organisation Qdrant collections."""
+
+from __future__ import annotations
+
+import logging
+import re
+from typing import Any
+from uuid import NAMESPACE_URL, uuid5
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, PointStruct, VectorParams
+
+from app.config import settings
+from app.rag.chunker import build_chunks
+from app.rag.embedder import embed_passages
+
+logger = logging.getLogger("doqseal.rag")
+
+_client: QdrantClient | None = None
+_VECTOR_SIZE = 768
+
+
+def _get_client() -> QdrantClient:
+    global _client
+    if _client is None:
+        _client = QdrantClient(url=settings.qdrant_url)
+    return _client
+
+
+def _collection_name(organisation_id: str) -> str:
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", organisation_id)
+    return f"org_{safe_id}"
+
+
+def _ensure_collection(organisation_id: str) -> str:
+    client = _get_client()
+    name = _collection_name(organisation_id)
+    if not client.collection_exists(name):
+        client.create_collection(
+            collection_name=name,
+            vectors_config=VectorParams(size=_VECTOR_SIZE, distance=Distance.COSINE),
+        )
+        logger.info("Created Qdrant collection %s", name)
+    return name
+
+
+def _point_id(document_id: str, source: str, index: int) -> str:
+    return str(uuid5(NAMESPACE_URL, f"{document_id}:{source}:{index}"))
+
+
+def index_extraction(
+    *,
+    organisation_id: str,
+    document_id: str,
+    job_id: str,
+    project_id: str,
+    ocr_full_text: str | None,
+    extraction_data: dict[str, Any] | None,
+) -> int:
+    """Chunk, embed, and upsert extraction content. Returns number of points upserted."""
+    chunks = build_chunks(ocr_full_text, extraction_data)
+    if not chunks:
+        logger.info("No RAG chunks for document %s", document_id)
+        return 0
+
+    vectors = embed_passages([chunk["text"] for chunk in chunks])
+    collection_name = _ensure_collection(organisation_id)
+    client = _get_client()
+
+    points = [
+        PointStruct(
+            id=_point_id(document_id, chunk["source"], chunk["index"]),
+            vector=vector,
+            payload={
+                "organisationId": organisation_id,
+                "documentId": document_id,
+                "jobId": job_id,
+                "projectId": project_id,
+                "source": chunk["source"],
+                "chunkIndex": chunk["index"],
+                "text": chunk["text"],
+            },
+        )
+        for chunk, vector in zip(chunks, vectors)
+    ]
+
+    client.upsert(collection_name=collection_name, points=points)
+    logger.info(
+        "Indexed %d chunks for document %s into %s",
+        len(points),
+        document_id,
+        collection_name,
+    )
+    return len(points)
