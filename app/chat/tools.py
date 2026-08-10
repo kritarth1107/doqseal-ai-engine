@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import httpx
 
 from app.config import settings
 from app.db.mongo import get_db
+from app.rag.embedder import embed_query
 
 logger = logging.getLogger("doqseal.chat.tools")
 
 
 def _collection_name(organisation_id: str) -> str:
-    return f"org_{organisation_id}"
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", organisation_id)
+    return f"org_{safe_id}"
 
 
 def is_qdrant_available() -> bool:
@@ -40,7 +43,7 @@ def search_documents(
     project_id: str | None = None,
     limit: int = 5,
 ) -> list[dict[str, Any]]:
-    """Retrieve relevant chunks from Qdrant when available; otherwise return []."""
+    """Retrieve relevant chunks from Qdrant via vector search."""
     if not query.strip():
         return []
 
@@ -52,27 +55,34 @@ def search_documents(
     base_url = settings.qdrant_url.rstrip("/")
 
     try:
-        with httpx.Client(timeout=5.0) as client:
+        vector = embed_query(query)
+    except Exception as exc:
+        logger.warning("Query embedding failed: %s", exc)
+        return []
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
             if not _collection_exists(client, organisation_id):
                 logger.info("Qdrant collection %s not found", collection)
                 return []
 
-            scroll_filter: dict[str, Any] | None = None
+            query_filter: dict[str, Any] | None = None
             if project_id:
-                scroll_filter = {
+                query_filter = {
                     "must": [{"key": "projectId", "match": {"value": project_id}}]
                 }
 
             response = client.post(
-                f"{base_url}/collections/{collection}/points/scroll",
+                f"{base_url}/collections/{collection}/points/search",
                 json={
+                    "vector": vector,
                     "limit": limit,
                     "with_payload": True,
-                    "filter": scroll_filter,
+                    "filter": query_filter,
                 },
             )
             response.raise_for_status()
-            points = response.json().get("result", {}).get("points", [])
+            points = response.json().get("result", [])
     except Exception as exc:
         logger.warning("Qdrant retrieval failed: %s", exc)
         return []

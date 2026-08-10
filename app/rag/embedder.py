@@ -28,3 +28,9 @@ def embed_passages(texts: list[str]) -> list[list[float]]:
     prefixed = [f"passage: {text}" for text in texts]
     vectors = _get_model().encode(prefixed, normalize_embeddings=True)
     return [vector.tolist() for vector in vectors]
+
+
+def embed_query(text: str) -> list[float]:
+    prefixed = f"query: {text.strip()}"
+    vector = _get_model().encode(prefixed, normalize_embeddings=True)
+    return vector.tolist()

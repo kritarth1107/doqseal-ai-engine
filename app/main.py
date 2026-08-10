@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from app.chat import run_chat
 from app.config import settings
 from app.db.mongo import get_db
+from app.rag.indexer import delete_document_chunks
 
 app = FastAPI(
     title="DoqSeal Main Backend",
@@ -48,3 +49,15 @@ def chat(body: ChatRequest):
         project_id=body.projectId,
     )
     return ChatResponse(**result)
+
+
+@app.delete("/rag/documents/{document_id}")
+def delete_rag_document(document_id: str, organisationId: str):
+    if not organisationId.strip():
+        raise HTTPException(status_code=400, detail="organisationId is required")
+
+    deleted = delete_document_chunks(
+        organisation_id=organisationId,
+        document_id=document_id,
+    )
+    return {"deleted": deleted, "documentId": document_id}

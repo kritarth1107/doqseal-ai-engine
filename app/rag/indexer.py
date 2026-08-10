@@ -92,3 +92,44 @@ def index_extraction(
         collection_name,
     )
     return len(points)
+
+
+def delete_document_chunks(*, organisation_id: str, document_id: str) -> int:
+    """Remove all Qdrant points for a document. Returns deleted count (best effort)."""
+    client = _get_client()
+    collection_name = _collection_name(organisation_id)
+
+    if not client.collection_exists(collection_name):
+        return 0
+
+    deleted = 0
+    offset = None
+
+    while True:
+        records, next_offset = client.scroll(
+            collection_name=collection_name,
+            scroll_filter={
+                "must": [{"key": "documentId", "match": {"value": document_id}}]
+            },
+            limit=100,
+            offset=offset,
+            with_payload=False,
+            with_vectors=False,
+        )
+
+        point_ids = [record.id for record in records]
+        if point_ids:
+            client.delete(collection_name=collection_name, points_selector=point_ids)
+            deleted += len(point_ids)
+
+        if next_offset is None:
+            break
+        offset = next_offset
+
+    logger.info(
+        "Deleted %d Qdrant chunks for document %s from %s",
+        deleted,
+        document_id,
+        collection_name,
+    )
+    return deleted
