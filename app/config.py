@@ -1,0 +1,31 @@
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class Settings:
+    mongodb_uri: str = os.getenv("MONGODB_URI", "mongodb://localhost:27017/doqseal")
+    amqp_uri: str = os.getenv("AMQP_URI", "amqp://doqseal:doqseal@localhost:5672")
+    extraction_queue: str = os.getenv("EXTRACTION_QUEUE", "extraction.jobs")
+    storage_root: Path = Path(
+        os.getenv("STORAGE_ROOT", str(Path(__file__).resolve().parents[2] / "storage"))
+    ).resolve()
+    aes_secret: str = os.getenv("AES_SECRET", "")
+    host: str = os.getenv("HOST", "0.0.0.0")
+    port: int = int(os.getenv("PORT", "3031"))
+
+    # Extraction pipeline
+    extraction_mode: str = os.getenv("EXTRACTION_MODE", "hybrid")  # hybrid | ocr_only | stub
+    vlm_model: str = os.getenv(
+        "VLM_MODEL", "Qwen/Qwen2.5-VL-3B-Instruct"
+    )
+    vlm_use_4bit: bool = os.getenv("VLM_USE_4BIT", "true").lower() == "true"
+    max_pdf_pages: int = int(os.getenv("MAX_PDF_PAGES", "3"))
+    ocr_languages: str = os.getenv("OCR_LANGUAGES", "en,hi")
+    confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.75"))
+
+
+settings = Settings()
