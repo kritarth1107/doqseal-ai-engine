@@ -20,9 +20,15 @@ def _collection_name(organisation_id: str) -> str:
     return f"org_{safe_id}"
 
 
+def _qdrant_headers() -> dict[str, str]:
+    if settings.qdrant_api_key:
+        return {"api-key": settings.qdrant_api_key}
+    return {}
+
+
 def is_qdrant_available() -> bool:
     try:
-        with httpx.Client(timeout=2.0) as client:
+        with httpx.Client(timeout=5.0, headers=_qdrant_headers()) as client:
             response = client.get(f"{settings.qdrant_url.rstrip('/')}/collections")
             return response.status_code == 200
     except Exception:
@@ -61,7 +67,7 @@ def search_documents(
         return []
 
     try:
-        with httpx.Client(timeout=10.0) as client:
+        with httpx.Client(timeout=15.0, headers=_qdrant_headers()) as client:
             if not _collection_exists(client, organisation_id):
                 logger.info("Qdrant collection %s not found", collection)
                 return []

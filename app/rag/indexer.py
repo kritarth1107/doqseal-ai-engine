@@ -23,7 +23,10 @@ _VECTOR_SIZE = 768
 def _get_client() -> QdrantClient:
     global _client
     if _client is None:
-        _client = QdrantClient(url=settings.qdrant_url)
+        kwargs: dict[str, Any] = {"url": settings.qdrant_url}
+        if settings.qdrant_api_key:
+            kwargs["api_key"] = settings.qdrant_api_key
+        _client = QdrantClient(**kwargs)
     return _client
 
 

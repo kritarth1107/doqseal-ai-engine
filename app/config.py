@@ -13,6 +13,10 @@ class Settings:
     storage_root: Path = Path(
         os.getenv("STORAGE_ROOT", str(Path(__file__).resolve().parents[2] / "storage"))
     ).resolve()
+    azure_storage_connection_string: str = os.getenv(
+        "AZURE_STORAGE_CONNECTION_STRING", ""
+    )
+    azure_storage_container: str = os.getenv("AZURE_STORAGE_CONTAINER", "documents")
     aes_secret: str = os.getenv("AES_SECRET", "")
     host: str = os.getenv("HOST", "0.0.0.0")
     port: int = int(os.getenv("PORT", "3031"))
@@ -29,6 +33,7 @@ class Settings:
 
     # RAG indexing
     qdrant_url: str = os.getenv("QDRANT_URL", "http://localhost:6333")
+    qdrant_api_key: str = os.getenv("QDRANT_API_KEY", "")
     embedding_model: str = os.getenv(
         "EMBEDDING_MODEL", "intfloat/multilingual-e5-base"
     )

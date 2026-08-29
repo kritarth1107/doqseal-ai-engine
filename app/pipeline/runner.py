@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
 from app.config import settings
@@ -14,16 +13,13 @@ from app.pipeline.stub import generate_stub_extraction
 from app.pipeline.validate import validate_extraction
 from app.pipeline.vlm_extract import extract_with_vlm
 from app.utils.decrypt import decrypt_document_file
+from app.utils.blob_storage import load_ciphertext
 
 logger = logging.getLogger("doqseal.pipeline")
 
 
 def _load_plaintext(document: dict[str, Any], organisation_id: str) -> tuple[bytes, str]:
-    storage_path = Path(document["storagePath"])
-    if not storage_path.is_absolute():
-        storage_path = settings.storage_root / storage_path
-
-    ciphertext = storage_path.read_bytes()
+    ciphertext = load_ciphertext(document)
     mime_type = document.get("mimeType", "application/pdf")
 
     if document.get("isEncrypted") and document.get("encryption"):
@@ -35,7 +31,10 @@ def _load_plaintext(document: dict[str, Any], organisation_id: str) -> tuple[byt
             organisation_id,
             settings.aes_secret,
         )
-        mime_type = guess_mime_type(str(storage_path), mime_type)
+        mime_type = guess_mime_type(
+            str(document.get("storagePath") or document.get("storageUri") or ""),
+            mime_type,
+        )
         return plaintext, mime_type
 
     return ciphertext, mime_type
