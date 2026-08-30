@@ -27,6 +27,10 @@ class ChatResponse(BaseModel):
 @app.get("/health")
 def health():
     """Public-safe liveness. No paths, URIs, secrets, or infra hostnames."""
+    import httpx
+
+    from app.config import settings
+
     checks: dict[str, str] = {}
     status = "ok"
 
@@ -36,6 +40,16 @@ def health():
     except Exception:
         checks["mongodb"] = "down"
         status = "unhealthy"
+
+    try:
+        with httpx.Client(timeout=3.0) as client:
+            response = client.get(f"{settings.ollama_url.rstrip('/')}/api/tags")
+            checks["ollama"] = "up" if response.is_success else "down"
+    except Exception:
+        checks["ollama"] = "down"
+
+    if checks.get("ollama") == "down" and status == "ok":
+        status = "degraded"
 
     return {
         "status": status,

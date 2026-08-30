@@ -1,0 +1,65 @@
+# Deploys Ollama chat LLM to Azure Container Apps (gpu-t4) via OIDC.
+name: Deploy Ollama to Azure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile.ollama
+      - scripts/ollama-entrypoint.sh
+      - .github/workflows/deploy-ollama.yml
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ACR_NAME: doqsealprodacr
+  RESOURCE_GROUP: doqseal-prod-rg
+  CONTAINER_APP_NAME: doqseal-prod-ollama
+  IMAGE_NAME: doqseal-ollama
+  WORKLOAD_PROFILE: gpu-t4
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and push Ollama image to ACR
+        run: |
+          az acr build \
+            --registry "$ACR_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "${IMAGE_NAME}:${GITHUB_SHA}" \
+            --image "${IMAGE_NAME}:latest" \
+            --file Dockerfile.ollama \
+            . \
+            --no-logs
+
+      - name: Deploy Container App
+        run: |
+          az containerapp update \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${GITHUB_SHA}" \
+            --workload-profile-name "$WORKLOAD_PROFILE" \
+            --cpu 8 \
+            --memory 56Gi \
+            --min-replicas 0 \
+            --set-env-vars \
+              "GIT_SHA=${GITHUB_SHA}" \
+              "OLLAMA_MODEL=qwen2.5:7b-instruct" \
+              "OLLAMA_HOST=0.0.0.0:11434"
