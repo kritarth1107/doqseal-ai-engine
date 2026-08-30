@@ -49,7 +49,7 @@ def mark_job_completed(
     job_id: str,
     document_id: str,
     organisation_id: str,
-    project_id: str,
+    project_id: str | None,
     extraction_payload: dict[str, Any],
 ) -> None:
     now = utcnow()

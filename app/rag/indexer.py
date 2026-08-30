@@ -56,9 +56,11 @@ def index_extraction(
     organisation_id: str,
     document_id: str,
     job_id: str,
-    project_id: str,
+    project_id: str | None,
     ocr_full_text: str | None,
     extraction_data: dict[str, Any] | None,
+    uploaded_by: str | None = None,
+    shared_with_organisation: bool = True,
 ) -> int:
     """Chunk, embed, and upsert extraction content. Returns number of points upserted."""
     chunks = build_chunks(ocr_full_text, extraction_data)
@@ -79,6 +81,8 @@ def index_extraction(
                 "documentId": document_id,
                 "jobId": job_id,
                 "projectId": project_id,
+                "uploadedBy": uploaded_by,
+                "sharedWithOrganisation": shared_with_organisation,
                 "source": chunk["source"],
                 "chunkIndex": chunk["index"],
                 "text": chunk["text"],

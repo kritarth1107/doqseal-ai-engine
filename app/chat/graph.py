@@ -24,6 +24,7 @@ class ChatState(TypedDict):
     message: str
     organisation_id: str
     project_id: str | None
+    user_id: str | None
     context: list[dict[str, Any]]
     answer: str
     citations: list[dict[str, Any]]
@@ -76,6 +77,7 @@ def retrieve_node(state: ChatState) -> dict[str, Any]:
         state["organisation_id"],
         state["message"],
         project_id=state.get("project_id"),
+        user_id=state.get("user_id"),
     )
     return {"context": chunks}
 
@@ -128,12 +130,14 @@ def run_chat(
     organisation_id: str,
     *,
     project_id: str | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     result = _graph.invoke(
         {
             "message": message,
             "organisation_id": organisation_id,
             "project_id": project_id,
+            "user_id": user_id,
             "context": [],
             "answer": "",
             "citations": [],

@@ -29,23 +29,33 @@ def process_job(job_id: str) -> None:
         return
 
     document_id = job["documentId"]
-    project_id = job["projectId"]
+    project_id = job.get("projectId") or None
     organisation_id = job["organisationId"]
 
     document = load_document(document_id)
     if not document:
         raise ValueError(f"Document not found: {document_id}")
 
-    project = load_project(project_id)
-    if not project:
-        raise ValueError(f"Project not found: {project_id}")
+    # Common Drive uploads have no project — use a lightweight stub schema
+    if project_id:
+        project = load_project(project_id)
+        if not project:
+            raise ValueError(f"Project not found: {project_id}")
+    else:
+        project = {
+            "projectId": None,
+            "name": "Organisation Drive",
+            "extractionHint": "",
+            "fields": [],
+            "crossFieldRules": [],
+        }
 
     mark_job_processing(job_id, document_id)
     logger.info(
         "Processing job %s document=%s project=%s mode=%s",
         job_id,
         document_id,
-        project_id,
+        project_id or "_common",
         settings.extraction_mode,
     )
 
@@ -71,6 +81,8 @@ def process_job(job_id: str) -> None:
             document_id=document_id,
             job_id=job_id,
             project_id=project_id,
+            uploaded_by=document.get("uploadedBy"),
+            shared_with_organisation=document.get("sharedWithOrganisation") is not False,
             ocr_full_text=extraction_payload.get("ocrFullText"),
             extraction_data=extraction_payload.get("data"),
         )

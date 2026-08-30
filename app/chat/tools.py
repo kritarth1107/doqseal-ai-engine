@@ -47,6 +47,7 @@ def search_documents(
     query: str,
     *,
     project_id: str | None = None,
+    user_id: str | None = None,
     limit: int = 5,
 ) -> list[dict[str, Any]]:
     """Retrieve relevant chunks from Qdrant via vector search."""
@@ -78,11 +79,14 @@ def search_documents(
                     "must": [{"key": "projectId", "match": {"value": project_id}}]
                 }
 
+            # Over-fetch then apply visibility in Python (handles legacy payloads)
+            fetch_limit = max(limit * 4, 20) if user_id else limit
+
             response = client.post(
                 f"{base_url}/collections/{collection}/points/search",
                 json={
                     "vector": vector,
-                    "limit": limit,
+                    "limit": fetch_limit,
                     "with_payload": True,
                     "filter": query_filter,
                 },
@@ -99,6 +103,14 @@ def search_documents(
         text = payload.get("text") or payload.get("chunk") or payload.get("content")
         if not text:
             continue
+
+        # Visibility: private chunks only for the uploader; missing flag = shared (legacy)
+        if user_id:
+            shared = payload.get("sharedWithOrganisation")
+            uploaded_by = payload.get("uploadedBy")
+            if shared is False and uploaded_by and uploaded_by != user_id:
+                continue
+
         chunks.append(
             {
                 "documentId": payload.get("documentId"),
@@ -107,6 +119,8 @@ def search_documents(
                 "score": point.get("score"),
             }
         )
+        if len(chunks) >= limit:
+            break
 
     return chunks
 

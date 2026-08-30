@@ -16,6 +16,7 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=8000)
     organisationId: str = Field(..., min_length=1)
     projectId: str | None = None
+    userId: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -69,6 +70,7 @@ def chat(body: ChatRequest):
         message,
         body.organisationId,
         project_id=body.projectId,
+        user_id=body.userId,
     )
     return ChatResponse(**result)
 
