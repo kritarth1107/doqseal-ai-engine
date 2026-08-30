@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from app.chat import run_chat
-from app.config import settings
 from app.db.mongo import get_db
 from app.rag.indexer import delete_document_chunks
 
@@ -27,13 +26,22 @@ class ChatResponse(BaseModel):
 
 @app.get("/health")
 def health():
-    db = get_db()
-    db.command("ping")
+    """Public-safe liveness. No paths, URIs, secrets, or infra hostnames."""
+    checks: dict[str, str] = {}
+    status = "ok"
+
+    try:
+        get_db().command("ping")
+        checks["mongodb"] = "up"
+    except Exception:
+        checks["mongodb"] = "down"
+        status = "unhealthy"
+
     return {
-        "status": "ok",
-        "service": "doqseal-main-backend",
-        "queue": settings.extraction_queue,
-        "storage_root": str(settings.storage_root),
+        "status": status,
+        "service": "doqseal-ai-engine",
+        "version": app.version,
+        "checks": checks,
     }
 
 
