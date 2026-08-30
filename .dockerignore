@@ -1,0 +1,13 @@
+.venv
+__pycache__
+*.pyc
+.env
+.env.*
+!.env.example
+.git
+.github
+docs
+*.md
+.pytest_cache
+*.egg-info
+package-lock.json
