@@ -143,6 +143,13 @@ def _load_vlm():
     return _vlm_model, _vlm_processor
 
 
+def warmup_vlm() -> None:
+    """Optionally preload VLM at boot (slow; off by default)."""
+    logger.info("Warming up VLM…")
+    _load_vlm()
+    logger.info("VLM ready")
+
+
 def extract_with_vlm(
     project: dict[str, Any],
     pages: list[PageImage],

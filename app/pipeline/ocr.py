@@ -89,3 +89,25 @@ def run_ocr(pages: list[PageImage]) -> OcrResult:
         average_confidence=avg_conf,
         languages=settings.ocr_languages.split(","),
     )
+
+
+def ocr_result_from_text(text: str, confidence: float = 0.92) -> OcrResult:
+    """Build an OCR-like result from native PDF text (no EasyOCR)."""
+    lines = [
+        OcrLine(text=line.strip(), confidence=confidence)
+        for line in (text or "").splitlines()
+        if line.strip()
+    ]
+    return OcrResult(
+        full_text=(text or "").strip(),
+        lines=lines,
+        average_confidence=confidence if lines else 0.0,
+        languages=settings.ocr_languages.split(","),
+    )
+
+
+def warmup_ocr() -> None:
+    """Load EasyOCR once at worker boot so the first real job isn't a cold start."""
+    logger.info("Warming up EasyOCR…")
+    _get_ocr_engine()
+    logger.info("EasyOCR ready")

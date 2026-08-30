@@ -115,6 +115,22 @@ def on_message(channel, method, _properties, body):
 
 
 def start_worker() -> None:
+    if settings.warmup_models:
+        try:
+            from app.pipeline.ocr import warmup_ocr
+
+            warmup_ocr()
+        except Exception:
+            logger.exception("OCR warmup failed (continuing)")
+
+        if settings.warmup_vlm and settings.extraction_mode.lower() == "hybrid":
+            try:
+                from app.pipeline.vlm_extract import warmup_vlm
+
+                warmup_vlm()
+            except Exception:
+                logger.exception("VLM warmup failed (continuing)")
+
     connection = pika.BlockingConnection(pika.URLParameters(settings.amqp_uri))
     channel = connection.channel()
     channel.queue_declare(queue=settings.extraction_queue, durable=True)

@@ -35,10 +35,11 @@ def _enhance_image(image: Image.Image) -> Image.Image:
 def _load_pdf_pages(data: bytes, max_pages: int) -> list[PageImage]:
     doc = fitz.open(stream=data, filetype="pdf")
     pages: list[PageImage] = []
+    scale = max(1.0, float(settings.pdf_render_scale or 1.5))
     try:
         for index in range(min(len(doc), max_pages)):
             page = doc.load_page(index)
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
             image = Image.open(io.BytesIO(pix.tobytes("png")))
             image = _enhance_image(image)
             pages.append(
@@ -52,6 +53,30 @@ def _load_pdf_pages(data: bytes, max_pages: int) -> list[PageImage]:
     finally:
         doc.close()
     return pages
+
+
+def extract_pdf_text_layers(
+    file_bytes: bytes,
+    max_pages: int | None = None,
+) -> tuple[str, int]:
+    """
+    Pull native PDF text (born-digital forms). Returns (text, page_count_with_text).
+    Empty string when the PDF is scan-only.
+    """
+    limit = max_pages or settings.max_pdf_pages
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    chunks: list[str] = []
+    pages_with_text = 0
+    try:
+        for index in range(min(len(doc), limit)):
+            page = doc.load_page(index)
+            text = (page.get_text("text") or "").strip()
+            if text:
+                pages_with_text += 1
+                chunks.append(f"--- Page {index + 1} ---\n{text}")
+    finally:
+        doc.close()
+    return "\n\n".join(chunks).strip(), pages_with_text
 
 
 def _load_image_file(data: bytes) -> list[PageImage]:

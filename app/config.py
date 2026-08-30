@@ -30,6 +30,16 @@ class Settings:
     max_pdf_pages: int = int(os.getenv("MAX_PDF_PAGES", "3"))
     ocr_languages: str = os.getenv("OCR_LANGUAGES", "en,hi")
     confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.75"))
+    # Speed knobs — target <10s for typical 2-page digital PDFs
+    pdf_render_scale: float = float(os.getenv("PDF_RENDER_SCALE", "1.5"))
+    prefer_pdf_text: bool = os.getenv("PREFER_PDF_TEXT", "true").lower() == "true"
+    pdf_text_min_chars: int = int(os.getenv("PDF_TEXT_MIN_CHARS", "180"))
+    skip_vlm_min_ocr_confidence: float = float(
+        os.getenv("SKIP_VLM_MIN_OCR_CONFIDENCE", "0.72")
+    )
+    skip_vlm_min_text_chars: int = int(os.getenv("SKIP_VLM_MIN_TEXT_CHARS", "220"))
+    warmup_models: bool = os.getenv("WARMUP_MODELS", "true").lower() == "true"
+    warmup_vlm: bool = os.getenv("WARMUP_VLM", "false").lower() == "true"
 
     # RAG indexing
     qdrant_url: str = os.getenv("QDRANT_URL", "http://localhost:6333")

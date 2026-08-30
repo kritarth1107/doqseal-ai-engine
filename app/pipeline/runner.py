@@ -6,9 +6,13 @@ import logging
 from typing import Any
 
 from app.config import settings
-from app.pipeline.ocr import run_ocr
+from app.pipeline.ocr import ocr_result_from_text, run_ocr
 from app.pipeline.ocr_extract import extract_from_ocr
-from app.pipeline.preprocess import guess_mime_type, load_document_pages
+from app.pipeline.preprocess import (
+    extract_pdf_text_layers,
+    guess_mime_type,
+    load_document_pages,
+)
 from app.pipeline.stub import generate_stub_extraction
 from app.pipeline.title import suggest_display_title
 from app.pipeline.validate import validate_extraction
@@ -41,6 +45,14 @@ def _load_plaintext(document: dict[str, Any], organisation_id: str) -> tuple[byt
     return ciphertext, mime_type
 
 
+def _should_skip_vlm(ocr_text: str, average_confidence: float) -> bool:
+    text_len = len((ocr_text or "").strip())
+    return (
+        text_len >= settings.skip_vlm_min_text_chars
+        and average_confidence >= settings.skip_vlm_min_ocr_confidence
+    )
+
+
 def run_extraction_pipeline(
     document: dict[str, Any],
     project: dict[str, Any],
@@ -68,35 +80,71 @@ def run_extraction_pipeline(
     )
 
     file_bytes, mime_type = _load_plaintext(document, organisation_id)
-    pages = load_document_pages(file_bytes, mime_type)
-    if not pages:
-        raise ValueError("No pages could be loaded from document")
-
-    ocr = run_ocr(pages)
-    logger.info(
-        "OCR complete: %d lines, avg confidence %.2f",
-        len(ocr.lines),
-        ocr.average_confidence,
-    )
+    is_pdf = "pdf" in mime_type.lower()
 
     project = {
         **project,
         "_documentFilename": document.get("originalFilename") or "",
     }
 
-    extraction: dict[str, Any]
+    # Fast path: born-digital PDFs often have a text layer — skip EasyOCR + VLM
+    pdf_text = ""
+    pdf_pages_with_text = 0
+    if is_pdf and settings.prefer_pdf_text:
+        pdf_text, pdf_pages_with_text = extract_pdf_text_layers(file_bytes)
+        logger.info(
+            "PDF text layer: %d chars across %d pages",
+            len(pdf_text),
+            pdf_pages_with_text,
+        )
 
-    if mode == "ocr_only":
+    if (
+        is_pdf
+        and settings.prefer_pdf_text
+        and len(pdf_text) >= settings.pdf_text_min_chars
+    ):
+        ocr = ocr_result_from_text(pdf_text, confidence=0.93)
         extraction = extract_from_ocr(project, ocr)
+        extraction["strategy"] = "pdf_text"
+        logger.info("Using PDF text-layer extraction (skipped OCR/VLM)")
     else:
-        try:
-            extraction = extract_with_vlm(project, pages, ocr)
-            logger.info("VLM extraction succeeded")
-        except Exception as error:
-            logger.warning("VLM failed, falling back to OCR-only: %s", error)
+        pages = load_document_pages(file_bytes, mime_type)
+        if not pages:
+            raise ValueError("No pages could be loaded from document")
+
+        ocr = run_ocr(pages)
+        logger.info(
+            "OCR complete: %d lines, avg confidence %.2f",
+            len(ocr.lines),
+            ocr.average_confidence,
+        )
+
+        # If PDF had a weak text layer, merge it as a hint for OCR extract
+        if pdf_text and len(pdf_text) > 40:
+            merged = f"{pdf_text}\n\n{ocr.full_text}".strip()
+            ocr = ocr_result_from_text(
+                merged,
+                confidence=max(ocr.average_confidence, 0.7),
+            )
+
+        if mode == "ocr_only" or _should_skip_vlm(ocr.full_text, ocr.average_confidence):
             extraction = extract_from_ocr(project, ocr)
-            extraction["strategy"] = "ocr_fallback"
-            extraction["vlmError"] = str(error)
+            if mode != "ocr_only":
+                extraction["strategy"] = "ocr_fast"
+                logger.info(
+                    "Skipping VLM (text=%d chars, conf=%.2f)",
+                    len(ocr.full_text or ""),
+                    ocr.average_confidence,
+                )
+        else:
+            try:
+                extraction = extract_with_vlm(project, pages, ocr)
+                logger.info("VLM extraction succeeded")
+            except Exception as error:
+                logger.warning("VLM failed, falling back to OCR-only: %s", error)
+                extraction = extract_from_ocr(project, ocr)
+                extraction["strategy"] = "ocr_fallback"
+                extraction["vlmError"] = str(error)
 
     validated = validate_extraction(
         extraction.get("data", {}),
