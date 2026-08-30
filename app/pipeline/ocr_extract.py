@@ -1,4 +1,4 @@
-"""OCR-only field extraction — real text parsing without VLM."""
+"""OCR-only field extraction — schema-aware or open-ended document parsing."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from app.pipeline.ocr import OcrResult
+from app.pipeline.title import suggest_display_title
 
 
 def _find_after_label(text: str, labels: list[str]) -> str | None:
@@ -79,11 +80,124 @@ def _guess_from_schema(field: dict[str, Any], ocr_text: str) -> tuple[Any, float
     return None, 0.0
 
 
+def _extract_labeled_pointers(text: str, limit: int = 24) -> list[dict[str, Any]]:
+    pointers: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for match in re.finditer(
+        r"^([A-Za-z][A-Za-z0-9 /&\(\)\.\-]{2,60}?)\s*[:\-]\s*(.+)$",
+        text,
+        re.MULTILINE,
+    ):
+        label = re.sub(r"\s+", " ", match.group(1)).strip(" .")
+        value = re.sub(r"\s+", " ", match.group(2)).strip()
+        if len(value) < 2 or len(value) > 240:
+            continue
+        key = label.lower()
+        if key in seen or key in {"page", "of", "and", "the"}:
+            continue
+        seen.add(key)
+        pointers.append({"label": label, "value": value})
+        if len(pointers) >= limit:
+            break
+
+    cin = re.search(r"\b([UL]\d{5}[A-Z]{2}\d{4}[A-Z]{3}\d{6})\b", text)
+    if cin and "cin" not in seen:
+        pointers.insert(0, {"label": "CIN", "value": cin.group(1)})
+
+    company = re.search(
+        r"(?:name of the company|company name|name of company)\s*[:\-]?\s*([A-Za-z0-9 &.\-]{3,120})",
+        text,
+        re.I,
+    )
+    if company:
+        pointers.insert(0, {"label": "Company name", "value": company.group(1).strip()})
+
+    return pointers[:limit]
+
+
+def _page_heading(chunk: str, index: int) -> str:
+    for line in chunk.splitlines():
+        cleaned = re.sub(r"\s+", " ", line).strip()
+        if 8 <= len(cleaned) <= 80 and not re.match(r"^page\s+\d+", cleaned, re.I):
+            return cleaned
+    return f"Page {index}"
+
+
+def _open_ended_extraction(ocr: OcrResult, project: dict[str, Any]) -> dict[str, Any]:
+    text = ocr.full_text or ""
+    filename = str(project.get("_documentFilename") or "")
+    base_conf = max(ocr.average_confidence, 0.5)
+    pointers = _extract_labeled_pointers(text)
+    in_project = bool(project.get("projectId"))
+
+    preview = re.sub(r"\s+", " ", text).strip()[:400]
+    data: dict[str, Any] = {
+        "summary": preview
+        or (
+            f"Document processed"
+            f"{' for project ' + str(project.get('name')) if in_project else ' from Drive'}."
+        ),
+        "pointers": pointers,
+        "key_entities": {item["label"]: item["value"] for item in pointers[:12]},
+    }
+
+    if in_project:
+        data["project_context"] = project.get("name") or "Project"
+        if project.get("extractionHint"):
+            data["project_hint"] = project["extractionHint"]
+        if project.get("description"):
+            data["project_description"] = project["description"]
+    else:
+        data["source"] = "Organisation Drive"
+
+    page_chunks = re.split(r"\f|\n(?=Page\s+\d+)", text)
+    pages: list[dict[str, Any]] = []
+    for index, chunk in enumerate(page_chunks[:8], start=1):
+        chunk_clean = chunk.strip()
+        if len(re.sub(r"\s+", " ", chunk_clean)) < 40:
+            continue
+        pages.append(
+            {
+                "page": index,
+                "title": _page_heading(chunk_clean, index),
+                "summary": re.sub(r"\s+", " ", chunk_clean).strip()[:220],
+            }
+        )
+    if pages:
+        data["pages"] = pages
+
+    title = suggest_display_title(data, original_filename=filename, ocr_text=text)
+    if title:
+        data["suggested_title"] = title
+
+    confidence = {
+        "summary": round(base_conf * 0.85, 2),
+        "pointers": round(base_conf * 0.8, 2) if pointers else round(base_conf * 0.4, 2),
+        "key_entities": round(base_conf * 0.8, 2) if pointers else round(base_conf * 0.4, 2),
+    }
+    if title:
+        confidence["suggested_title"] = round(base_conf * 0.75, 2)
+
+    if not pointers and text:
+        data["ocr_preview"] = text[:2500]
+        confidence["ocr_preview"] = round(base_conf, 2)
+
+    return {
+        "data": data,
+        "fieldConfidence": confidence,
+        "strategy": "ocr",
+    }
+
+
 def extract_from_ocr(project: dict[str, Any], ocr: OcrResult) -> dict[str, Any]:
     fields = project.get("fields") or []
+
+    if not fields:
+        return _open_ended_extraction(ocr, project)
+
     data: dict[str, Any] = {}
     confidence: dict[str, float] = {}
-
     base_conf = max(ocr.average_confidence, 0.5)
 
     for field in fields:
@@ -96,8 +210,18 @@ def extract_from_ocr(project: dict[str, Any], ocr: OcrResult) -> dict[str, Any]:
             confidence[key] = round(base_conf * 0.4, 2)
 
     if not data and ocr.full_text:
-        data["_raw_ocr_preview"] = ocr.full_text[:2000]
-        confidence["_raw_ocr_preview"] = round(base_conf, 2)
+        open_payload = _open_ended_extraction(ocr, project)
+        data.update(open_payload["data"])
+        confidence.update(open_payload["fieldConfidence"])
+    else:
+        title = suggest_display_title(
+            data,
+            original_filename=str(project.get("_documentFilename") or ""),
+            ocr_text=ocr.full_text or "",
+        )
+        if title:
+            data["suggested_title"] = title
+            confidence["suggested_title"] = round(base_conf * 0.75, 2)
 
     return {
         "data": data,

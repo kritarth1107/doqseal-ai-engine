@@ -10,10 +10,11 @@ from app.pipeline.ocr import run_ocr
 from app.pipeline.ocr_extract import extract_from_ocr
 from app.pipeline.preprocess import guess_mime_type, load_document_pages
 from app.pipeline.stub import generate_stub_extraction
+from app.pipeline.title import suggest_display_title
 from app.pipeline.validate import validate_extraction
 from app.pipeline.vlm_extract import extract_with_vlm
-from app.utils.decrypt import decrypt_document_file
 from app.utils.blob_storage import load_ciphertext
+from app.utils.decrypt import decrypt_document_file
 
 logger = logging.getLogger("doqseal.pipeline")
 
@@ -50,6 +51,14 @@ def run_extraction_pipeline(
     if mode == "stub":
         payload = generate_stub_extraction(project)
         payload["strategy"] = "stub"
+        title = suggest_display_title(
+            payload.get("data"),
+            original_filename=str(document.get("originalFilename") or ""),
+        )
+        if title:
+            payload["displayTitle"] = title
+            if isinstance(payload.get("data"), dict):
+                payload["data"].setdefault("suggested_title", title)
         return payload
 
     logger.info(
@@ -69,6 +78,11 @@ def run_extraction_pipeline(
         len(ocr.lines),
         ocr.average_confidence,
     )
+
+    project = {
+        **project,
+        "_documentFilename": document.get("originalFilename") or "",
+    }
 
     extraction: dict[str, Any]
 
@@ -91,6 +105,14 @@ def run_extraction_pipeline(
         settings.confidence_threshold,
     )
 
+    display_title = suggest_display_title(
+        validated.get("data"),
+        original_filename=str(document.get("originalFilename") or ""),
+        ocr_text=ocr.full_text or "",
+    )
+    if display_title and isinstance(validated.get("data"), dict):
+        validated["data"].setdefault("suggested_title", display_title)
+
     return {
         "data": validated["data"],
         "fieldConfidence": validated["fieldConfidence"],
@@ -101,4 +123,5 @@ def run_extraction_pipeline(
         "ocrLineCount": len(ocr.lines),
         "ocrAverageConfidence": round(ocr.average_confidence, 3),
         "lowConfidenceFields": validated.get("lowConfidenceFields", []),
+        "displayTitle": display_title,
     }

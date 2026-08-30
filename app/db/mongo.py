@@ -89,9 +89,14 @@ def mark_job_completed(
         },
     )
 
+    document_update: dict[str, Any] = {"status": "completed", "updatedAt": now}
+    display_title = extraction_payload.get("displayTitle")
+    if isinstance(display_title, str) and display_title.strip():
+        document_update["displayTitle"] = display_title.strip()
+
     db.documents.update_one(
         {"documentId": document_id},
-        {"$set": {"status": "completed", "updatedAt": now}},
+        {"$set": document_update},
     )
 
 

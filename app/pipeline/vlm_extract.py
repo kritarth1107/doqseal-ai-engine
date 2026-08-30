@@ -20,30 +20,64 @@ _vlm_load_failed = False
 
 def _build_schema_prompt(project: dict[str, Any], ocr: OcrResult) -> str:
     fields = project.get("fields") or []
-    field_lines = []
-    for field in fields:
-        req = "required" if field.get("required") else "optional"
-        field_lines.append(
-            f'- "{field["key"]}" ({field.get("type", "string")}, {req}): {field.get("label", field["key"])}'
-        )
-
-    schema_block = "\n".join(field_lines) or '- "summary" (string): Brief document summary'
     hint = project.get("extractionHint") or project.get("description") or ""
-    ocr_preview = ocr.full_text[:3500] if ocr.full_text else "No OCR text detected."
+    ocr_preview = ocr.full_text[:4000] if ocr.full_text else "No OCR text detected."
+    in_project = bool(project.get("projectId"))
+    project_name = project.get("name") or ("Organisation Drive" if not in_project else "Project")
 
-    return f"""You are extracting structured data from an Indian medical/compliance document.
-Project: {project.get("name", "Unknown")}
-Context: {hint}
+    if fields:
+        field_lines = []
+        for field in fields:
+            req = "required" if field.get("required") else "optional"
+            field_lines.append(
+                f'- "{field["key"]}" ({field.get("type", "string")}, {req}): '
+                f'{field.get("label", field["key"])}'
+            )
+        schema_block = "\n".join(field_lines)
+        schema_block += """
+- "suggested_title" (string): Short human-readable title for this file (what it is about)
+- "summary" (string): 1-3 sentence summary of the document contents
+- "pages" (array, optional): [{ "page": 1, "title": "...", "summary": "..." }]
+"""
+    else:
+        schema_block = """
+- "suggested_title" (string): Short clear title a user would recognize (who/what the document is about)
+- "summary" (string): What the document contains (2-4 sentences), inferred only from the pages
+- "key_entities" (object): Important named values found in the document
+- "pointers" (array): Key facts as [{ "label": "...", "value": "...", "page": 1 }]
+- "pages" (array): [{ "page": number, "title": heading from that page, "summary": what it covers }]
+- "auto_tags" (array of strings): Useful search tags derived from content
+"""
 
-Return ONLY valid JSON object with these keys:
+    scope = (
+        f"This file belongs to project «{project_name}». "
+        f"Use the project context below when deciding which pointers matter.\n"
+        f"Project context: {hint or 'No extra hint — rely on the document itself.'}"
+        if in_project
+        else (
+            "This file was uploaded to Organisation Drive (no project). "
+            "Read the document and extract whatever it actually contains — "
+            "do not assume a category in advance."
+        )
+    )
+
+    return f"""You are DoqSeal's document intelligence extractor.
+Read the document first. Infer what it is from its own content. Extract useful structured pointers.
+
+{scope}
+
+Return ONLY a valid JSON object with these keys:
 {schema_block}
 
 Rules:
-- Use Hindi or English source text as appropriate.
+- Do not assume a document category before reading the content.
+- Do not invent labels or facts that are not supported by the document or OCR.
+- Prefer concrete entities, identifiers, dates, amounts, parties, and clauses that appear in the text.
+- Use Hindi or English as present in the source.
 - For boolean stamp/signature fields, use true if visible/present else false.
 - For numbers, return numeric JSON values not strings.
-- If a field is missing, use null.
-- Do not invent data not supported by the document or OCR.
+- If a field is missing, use null or omit it.
+- suggested_title must help a user recognize the file at a glance.
 
 OCR reference text:
 {ocr_preview}

@@ -39,6 +39,17 @@ def _coerce_value(field_type: str, raw: Any) -> Any:
     return str(raw).strip() if str(raw).strip() else None
 
 
+def _confidence_for_open_data(data: dict[str, Any], existing: dict[str, float]) -> dict[str, float]:
+    confidence: dict[str, float] = dict(existing)
+    for key, value in data.items():
+        if key in confidence:
+            continue
+        if value in (None, "", [], {}):
+            continue
+        confidence[key] = 0.75
+    return confidence
+
+
 def validate_extraction(
     data: dict[str, Any],
     field_confidence: dict[str, float],
@@ -47,6 +58,30 @@ def validate_extraction(
 ) -> dict[str, Any]:
     fields = project.get("fields") or []
     errors: list[str] = []
+
+    # No project schema → keep open-ended extraction (do not wipe to {})
+    if not fields:
+        cleaned = {
+            key: value
+            for key, value in (data or {}).items()
+            if value not in (None, "")
+        }
+        confidence = _confidence_for_open_data(cleaned, field_confidence or {})
+        low_confidence_fields = [
+            key for key, score in confidence.items() if score < confidence_threshold
+        ]
+        status = "approved_with_warnings" if low_confidence_fields else "approved"
+        if not cleaned:
+            status = "needs_review"
+            errors.append("No structured fields could be extracted")
+        return {
+            "data": cleaned,
+            "fieldConfidence": confidence,
+            "validationErrors": errors,
+            "status": status,
+            "lowConfidenceFields": low_confidence_fields,
+        }
+
     coerced: dict[str, Any] = {}
 
     for field in fields:
@@ -66,6 +101,14 @@ def validate_extraction(
                 errors.append(f"{key} below minimum ({rules['min']})")
             if "max" in rules and value > rules["max"]:
                 errors.append(f"{key} above maximum ({rules['max']})")
+
+    # Preserve useful open keys the model returned beyond the schema
+    for key, value in (data or {}).items():
+        if key in coerced:
+            continue
+        if key in {"document_type", "summary", "pages", "pointers", "key_entities", "auto_tags", "suggested_title"}:
+            if value not in (None, "", []):
+                coerced[key] = value
 
     low_confidence_fields = [
         key
