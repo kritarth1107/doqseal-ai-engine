@@ -20,7 +20,8 @@ _vlm_load_failed = False
 
 def _build_schema_prompt(project: dict[str, Any], ocr: OcrResult) -> str:
     fields = project.get("fields") or []
-    hint = project.get("extractionHint") or project.get("description") or ""
+    hint = (project.get("extractionHint") or "").strip()
+    description = (project.get("description") or "").strip()
     ocr_preview = ocr.full_text[:4000] if ocr.full_text else "No OCR text detected."
     in_project = bool(project.get("projectId"))
     project_name = project.get("name") or ("Organisation Drive" if not in_project else "Project")
@@ -44,22 +45,31 @@ def _build_schema_prompt(project: dict[str, Any], ocr: OcrResult) -> str:
 - "suggested_title" (string): Short clear title a user would recognize (who/what the document is about)
 - "summary" (string): What the document contains (2-4 sentences), inferred only from the pages
 - "key_entities" (object): Important named values found in the document
+- "checklist" (object): For each item in the project extraction context, map label → found value, true/false for stamps/presence, or null if missing
 - "pointers" (array): Key facts as [{ "label": "...", "value": "...", "page": 1 }]
 - "pages" (array): [{ "page": number, "title": heading from that page, "summary": what it covers }]
 - "auto_tags" (array of strings): Useful search tags derived from content
 """
 
-    scope = (
-        f"This file belongs to project «{project_name}». "
-        f"Use the project context below when deciding which pointers matter.\n"
-        f"Project context: {hint or 'No extra hint — rely on the document itself.'}"
-        if in_project
-        else (
+    if in_project and hint:
+        scope = (
+            f"This file belongs to project «{project_name}».\n"
+            f"PRIMARY EXTRACTION CONTEXT (follow this closely — extract/verify every item):\n"
+            f"{hint}\n"
+            f"{'Project description: ' + description if description else ''}"
+        )
+    elif in_project:
+        scope = (
+            f"This file belongs to project «{project_name}». "
+            f"Use the project description when deciding which pointers matter.\n"
+            f"Project description: {description or 'No extra hint — rely on the document itself.'}"
+        )
+    else:
+        scope = (
             "This file was uploaded to Organisation Drive (no project). "
             "Read the document and extract whatever it actually contains — "
             "do not assume a category in advance."
         )
-    )
 
     return f"""You are DoqSeal's document intelligence extractor.
 Read the document first. Infer what it is from its own content. Extract useful structured pointers.
@@ -70,6 +80,7 @@ Return ONLY a valid JSON object with these keys:
 {schema_block}
 
 Rules:
+- When extraction context is provided, prioritize those fields/checklist items over general extraction.
 - Do not assume a document category before reading the content.
 - Do not invent labels or facts that are not supported by the document or OCR.
 - Prefer concrete entities, identifiers, dates, amounts, parties, and clauses that appear in the text.

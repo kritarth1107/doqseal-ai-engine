@@ -124,12 +124,68 @@ def _page_heading(chunk: str, index: int) -> str:
     return f"Page {index}"
 
 
+def _parse_hint_labels(hint: str) -> list[str]:
+    """Split free-text extraction context into checklist-style labels."""
+    if not hint or not hint.strip():
+        return []
+    parts = re.split(r"[\n,;•]+|(?:\s+-\s+)", hint)
+    labels: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        cleaned = re.sub(
+            r"^(?:check|verify|extract|look\s+for|find)\s+",
+            "",
+            part.strip(),
+            flags=re.I,
+        )
+        cleaned = cleaned.strip(" .:-")
+        if len(cleaned) < 2 or len(cleaned) > 80:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(cleaned)
+    return labels[:40]
+
+
+def _extract_from_hint(ocr_text: str, hint: str) -> dict[str, Any]:
+    """Try to fill checklist items from extractionHint against OCR text."""
+    checklist: dict[str, Any] = {}
+    pointers: list[dict[str, Any]] = []
+    for label in _parse_hint_labels(hint):
+        lower = label.lower()
+        # Presence / stamp style
+        if any(token in lower for token in ("stamp", "seal", "signature", "signed")):
+            present = any(
+                token in ocr_text.lower()
+                for token in (lower, "stamp", "seal", "signature")
+            )
+            checklist[label] = present
+            pointers.append({"label": label, "value": present})
+            continue
+
+        value = _find_after_label(ocr_text, [label])
+        if value:
+            checklist[label] = value
+            pointers.append({"label": label, "value": value})
+        else:
+            # Fuzzy: label appears somewhere in text
+            if re.search(re.escape(label), ocr_text, re.I):
+                checklist[label] = True
+                pointers.append({"label": label, "value": True})
+            else:
+                checklist[label] = None
+    return {"checklist": checklist, "hint_pointers": pointers}
+
+
 def _open_ended_extraction(ocr: OcrResult, project: dict[str, Any]) -> dict[str, Any]:
     text = ocr.full_text or ""
     filename = str(project.get("_documentFilename") or "")
     base_conf = max(ocr.average_confidence, 0.5)
     pointers = _extract_labeled_pointers(text)
     in_project = bool(project.get("projectId"))
+    hint = (project.get("extractionHint") or "").strip()
 
     preview = re.sub(r"\s+", " ", text).strip()[:400]
     data: dict[str, Any] = {
@@ -144,8 +200,22 @@ def _open_ended_extraction(ocr: OcrResult, project: dict[str, Any]) -> dict[str,
 
     if in_project:
         data["project_context"] = project.get("name") or "Project"
-        if project.get("extractionHint"):
-            data["project_hint"] = project["extractionHint"]
+        if hint:
+            data["project_hint"] = hint
+            hint_payload = _extract_from_hint(text, hint)
+            if hint_payload["checklist"]:
+                data["checklist"] = hint_payload["checklist"]
+            # Prefer hint-driven pointers first
+            merged = hint_payload["hint_pointers"] + [
+                p
+                for p in pointers
+                if p["label"].lower()
+                not in {h["label"].lower() for h in hint_payload["hint_pointers"]}
+            ]
+            data["pointers"] = merged[:24]
+            data["key_entities"] = {
+                item["label"]: item["value"] for item in data["pointers"][:12]
+            }
         if project.get("description"):
             data["project_description"] = project["description"]
     else:
@@ -173,13 +243,17 @@ def _open_ended_extraction(ocr: OcrResult, project: dict[str, Any]) -> dict[str,
 
     confidence = {
         "summary": round(base_conf * 0.85, 2),
-        "pointers": round(base_conf * 0.8, 2) if pointers else round(base_conf * 0.4, 2),
-        "key_entities": round(base_conf * 0.8, 2) if pointers else round(base_conf * 0.4, 2),
+        "pointers": round(base_conf * 0.8, 2) if data["pointers"] else round(base_conf * 0.4, 2),
+        "key_entities": round(base_conf * 0.8, 2)
+        if data["key_entities"]
+        else round(base_conf * 0.4, 2),
     }
+    if data.get("checklist"):
+        confidence["checklist"] = round(base_conf * 0.78, 2)
     if title:
         confidence["suggested_title"] = round(base_conf * 0.75, 2)
 
-    if not pointers and text:
+    if not data["pointers"] and text:
         data["ocr_preview"] = text[:2500]
         confidence["ocr_preview"] = round(base_conf, 2)
 

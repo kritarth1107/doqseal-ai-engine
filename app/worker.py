@@ -14,6 +14,7 @@ from app.db.mongo import (
 )
 from app.pipeline.runner import run_extraction_pipeline
 from app.rag.indexer import index_extraction
+from app.webhooks import dispatch_project_webhooks
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("doqseal.worker")
@@ -36,7 +37,6 @@ def process_job(job_id: str) -> None:
     if not document:
         raise ValueError(f"Document not found: {document_id}")
 
-    # Common Drive uploads have no project — use a lightweight stub schema
     if project_id:
         project = load_project(project_id)
         if not project:
@@ -51,15 +51,55 @@ def process_job(job_id: str) -> None:
         }
 
     mark_job_processing(job_id, document_id)
+    hint = (project.get("extractionHint") or "").strip()
     logger.info(
-        "Processing job %s document=%s project=%s mode=%s",
+        "Processing job %s document=%s project=%s mode=%s hint_chars=%d",
         job_id,
         document_id,
         project_id or "_common",
         settings.extraction_mode,
+        len(hint),
     )
+    if hint:
+        logger.info("Extraction context for %s: %s", project_id, hint[:240])
 
-    extraction_payload = run_extraction_pipeline(document, project, organisation_id)
+    if project_id:
+        try:
+            dispatch_project_webhooks(
+                project,
+                event="document.processing",
+                project_id=project_id,
+                document_id=document_id,
+                job_id=job_id,
+                organisation_id=organisation_id,
+                document=document,
+                status="processing",
+            )
+        except Exception:
+            logger.exception("Webhook dispatch failed for processing %s", job_id)
+
+    try:
+        extraction_payload = run_extraction_pipeline(
+            document, project, organisation_id
+        )
+    except Exception as error:
+        mark_job_failed(job_id, document_id, str(error))
+        if project_id:
+            try:
+                dispatch_project_webhooks(
+                    project,
+                    event="document.failed",
+                    project_id=project_id,
+                    document_id=document_id,
+                    job_id=job_id,
+                    organisation_id=organisation_id,
+                    document=document,
+                    error=str(error),
+                    status="failed",
+                )
+            except Exception:
+                logger.exception("Webhook dispatch failed for failed %s", job_id)
+        raise
 
     mark_job_completed(
         job_id,
@@ -74,6 +114,22 @@ def process_job(job_id: str) -> None:
         extraction_payload.get("strategy"),
         extraction_payload.get("status"),
     )
+
+    if project_id:
+        try:
+            dispatch_project_webhooks(
+                project,
+                event="document.processed",
+                project_id=project_id,
+                document_id=document_id,
+                job_id=job_id,
+                organisation_id=organisation_id,
+                document=document,
+                extraction_payload=extraction_payload,
+                status="completed",
+            )
+        except Exception:
+            logger.exception("Webhook dispatch failed for job %s", job_id)
 
     try:
         indexed = index_extraction(
@@ -107,8 +163,23 @@ def on_message(channel, method, _properties, body):
             job_id = payload.get("jobId")
             if job_id:
                 job = load_job(job_id)
-                if job:
+                if job and job.get("status") != "failed":
                     mark_job_failed(job_id, job["documentId"], str(error))
+                    project_id = job.get("projectId")
+                    if project_id:
+                        project = load_project(project_id)
+                        document = load_document(job["documentId"])
+                        dispatch_project_webhooks(
+                            project,
+                            event="document.failed",
+                            project_id=project_id,
+                            document_id=job["documentId"],
+                            job_id=job_id,
+                            organisation_id=job["organisationId"],
+                            document=document,
+                            error=str(error),
+                            status="failed",
+                        )
         except Exception:
             logger.exception("Failed to mark job as failed")
         channel.basic_ack(delivery_tag=method.delivery_tag)
