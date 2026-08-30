@@ -1,3 +1,4 @@
+# Deploys AI engine to Azure Container Apps via OIDC (AZURE_* repo secrets).
 name: Deploy to Azure Container Apps
 
 on:
