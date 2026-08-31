@@ -23,9 +23,8 @@ class Settings:
 
     # Extraction pipeline
     extraction_mode: str = os.getenv("EXTRACTION_MODE", "hybrid")  # hybrid | ocr_only | stub
-    vlm_model: str = os.getenv(
-        "VLM_MODEL", "Qwen/Qwen2.5-VL-3B-Instruct"
-    )
+    # Vision + chat via Ollama (multimodal). Default: Gemma 4 E4B.
+    vlm_model: str = os.getenv("VLM_MODEL", "gemma4:e4b")
     vlm_use_4bit: bool = os.getenv("VLM_USE_4BIT", "true").lower() == "true"
     max_pdf_pages: int = int(os.getenv("MAX_PDF_PAGES", "3"))
     ocr_languages: str = os.getenv("OCR_LANGUAGES", "en,hi")
@@ -48,9 +47,9 @@ class Settings:
         "EMBEDDING_MODEL", "intfloat/multilingual-e5-base"
     )
 
-    # Chat
+    # Chat / vision LLM (Ollama)
     ollama_url: str = os.getenv("OLLAMA_URL", "http://localhost:11434")
-    llm_model: str = os.getenv("LLM_MODEL", "qwen2.5:7b-instruct")
+    llm_model: str = os.getenv("LLM_MODEL", "gemma4:e4b")
 
 
 settings = Settings()

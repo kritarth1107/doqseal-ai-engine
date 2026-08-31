@@ -61,5 +61,5 @@ jobs:
             --min-replicas 1 \
             --set-env-vars \
               "GIT_SHA=${GITHUB_SHA}" \
-              "OLLAMA_MODEL=qwen2.5:7b-instruct" \
+              "OLLAMA_MODEL=gemma4:e4b" \
               "OLLAMA_HOST=0.0.0.0:11434"

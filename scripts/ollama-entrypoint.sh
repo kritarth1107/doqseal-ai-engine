@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL="${OLLAMA_MODEL:-qwen2.5:7b-instruct}"
+MODEL="${OLLAMA_MODEL:-gemma4:e4b}"
 export OLLAMA_HOST="${OLLAMA_HOST:-0.0.0.0:11434}"
 
 echo "Starting Ollama server on ${OLLAMA_HOST}..."

@@ -62,4 +62,7 @@ jobs:
               "TRANSFORMERS_CACHE=/models/huggingface/hub" \
               "NVIDIA_VISIBLE_DEVICES=all" \
               "TORCHDYNAMO_DISABLE=1" \
-              "TORCH_COMPILE_DISABLE=1"
+              "TORCH_COMPILE_DISABLE=1" \
+              "VLM_MODEL=gemma4:e4b" \
+              "LLM_MODEL=gemma4:e4b" \
+              "EXTRACTION_MODE=hybrid"
