@@ -54,9 +54,8 @@ def _build_schema_prompt(project: dict[str, Any], ocr: OcrResult) -> str:
             )
         schema_block = "\n".join(field_lines)
         schema_block += """
-- "suggested_title" (string)
-- "summary" (string)
-- "pages" (array, optional): [{ "page": 1, "title": "...", "summary": "..." }]
+- "suggested_title" (string): short human title from patient + key tests
+- "summary" (string): 1-2 sentences of filled values only
 """
     elif trf_mode:
         schema_block = """
@@ -113,19 +112,39 @@ def _build_schema_prompt(project: dict[str, Any], ocr: OcrResult) -> str:
     else:
         scope = "Organisation Drive upload. Read handwriting carefully from the image."
 
+    quality_rules = """
+Quality rules (critical):
+- Trust the IMAGE for handwriting; OCR is noisy and often wrong.
+- Extract ONLY clearly filled / handwritten / checked values.
+- NEVER invent values. NEVER copy blank printed labels as values.
+- Do NOT treat specimen-type checkboxes (Blood EDTA, Serum, etc.) as tests
+  unless they are clearly the requested test names in a Tests section.
+- tests / tests_requested = handwritten test names only (e.g. B group, TFT, HBsAg).
+- Gender from the checked M/F box. Age as a number when readable.
+- Missing or unreadable → null (or "" only if the schema forbids null).
+- Prefer precision over completeness.
+"""
+
     trf_rules = ""
-    if trf_mode:
+    if trf_mode and not fields:
         trf_rules = """
-TRF rules:
+TRF structure rules:
 - Prefer handwritten filled values over blank printed labels.
-- Extract Patient Name, Age, Gender (checked box), Client Code, and every Test Description.
+- Extract Patient Name, Age, Gender, Client Code, and every handwritten Test Description.
 - tests[] must include each handwritten test (e.g. B group, TFT, HBsAg).
-- Empty fields → null. Do not invent values.
+"""
+
+    field_rules = ""
+    if fields:
+        field_rules = """
+Schema rules:
+- Return ONLY the keys listed above (plus suggested_title and summary).
+- Do not add extra nested objects or junk keys.
+- String fields with multiple values (e.g. tests) → comma-separated string.
 """
 
     return f"""You are DoqSeal's document intelligence extractor.
 You receive the document IMAGE plus noisy OCR text.
-Trust the IMAGE for handwriting; OCR is only a weak hint.
 
 {scope}
 
@@ -133,10 +152,11 @@ Return ONLY valid JSON with these keys:
 {schema_block}
 
 Rules:
-- Extract only what is visible.
-- Prefer names, ages, codes, test names, dates, phones.
-- Numbers as JSON numbers. Missing → null.
+- Extract only what is visible and useful for ops / billing / lab intake.
+- Numbers as JSON numbers. Booleans as true/false.
+{quality_rules}
 {trf_rules}
+{field_rules}
 
 OCR reference (may be wrong — verify against the image):
 {ocr_preview}
