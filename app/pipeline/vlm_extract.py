@@ -143,32 +143,70 @@ OCR reference (may be wrong — verify against the image):
 """
 
 
+def _repair_json_text(blob: str) -> str:
+    """Best-effort cleanup for common multimodal LLM JSON glitches."""
+    text = blob.strip()
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.I).strip()
+    text = re.sub(r"<\|.*?\|>", "", text).strip()
+    fence = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.I)
+    if fence:
+        text = fence.group(1).strip()
+
+    start = text.find("{")
+    if start == -1:
+        return text
+    text = text[start:]
+
+    # Drop trailing commas before } or ]
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+    # Replace smart quotes
+    text = text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+    return text
+
+
 def _parse_json_response(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    # Strip optional thinking blocks some models emit
-    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", cleaned, flags=re.I).strip()
-    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
-    if fence_match:
-        cleaned = fence_match.group(1)
+    cleaned = _repair_json_text(text)
+    candidates = [cleaned]
 
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError("Model response did not contain JSON object")
+    # If truncated, try closing open braces/brackets
+    open_curly = cleaned.count("{") - cleaned.count("}")
+    open_square = cleaned.count("[") - cleaned.count("]")
+    if open_curly > 0 or open_square > 0:
+        patched = cleaned.rstrip().rstrip(",")
+        patched += "]" * max(0, open_square)
+        patched += "}" * max(0, open_curly)
+        candidates.append(patched)
 
-    return json.loads(cleaned[start : end + 1])
+    last_error: Exception | None = None
+    for candidate in candidates:
+        end = candidate.rfind("}")
+        if end == -1:
+            continue
+        snippet = candidate[: end + 1]
+        try:
+            parsed = json.loads(snippet)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception as err:
+            last_error = err
+            continue
+
+    preview = (text or "")[:800].replace("\n", " ")
+    raise ValueError(
+        f"Model response was not valid JSON ({last_error}); preview={preview!r}"
+    )
 
 
 def _image_to_base64(page: PageImage) -> str:
     buf = io.BytesIO()
     # Keep resolution reasonable for Ollama vision
     image = page.image.convert("RGB")
-    max_side = 1600
+    max_side = 1280
     w, h = image.size
     if max(w, h) > max_side:
         scale = max_side / float(max(w, h))
         image = image.resize((int(w * scale), int(h * scale)))
-    image.save(buf, format="JPEG", quality=90)
+    image.save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
@@ -180,8 +218,8 @@ def _call_ollama_vision(prompt: str, image_b64: str) -> str:
         "stream": False,
         "format": "json",
         "options": {
-            "temperature": 0.1,
-            "num_predict": 1600,
+            "temperature": 0.0,
+            "num_predict": 4096,
         },
         "messages": [
             {
@@ -195,6 +233,7 @@ def _call_ollama_vision(prompt: str, image_b64: str) -> str:
     timeout = httpx.Timeout(connect=120.0, read=600.0, write=120.0, pool=60.0)
     logger.info("Ollama vision extract model=%s url=%s", model, url)
     last_error: Exception | None = None
+    body: dict[str, Any] = {}
     for attempt in range(1, 4):
         try:
             with httpx.Client(timeout=timeout) as client:
@@ -251,7 +290,20 @@ def extract_with_vlm(
     prompt = _build_schema_prompt(project, ocr)
     image_b64 = _image_to_base64(pages[0])
     raw = _call_ollama_vision(prompt, image_b64)
-    parsed = _parse_json_response(raw)
+    try:
+        parsed = _parse_json_response(raw)
+    except Exception as err:
+        logger.warning(
+            "First JSON parse failed (%s); retrying vision once with stricter prompt",
+            err,
+        )
+        retry_prompt = (
+            prompt
+            + "\n\nIMPORTANT: Reply with a single minified JSON object only. "
+            "No markdown, no comments, no trailing commas."
+        )
+        raw = _call_ollama_vision(retry_prompt, image_b64)
+        parsed = _parse_json_response(raw)
 
     field_confidence = {
         key: round(min(0.97, max(0.72, ocr.average_confidence + 0.25)), 2)

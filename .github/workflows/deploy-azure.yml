@@ -65,4 +65,5 @@ jobs:
               "TORCH_COMPILE_DISABLE=1" \
               "VLM_MODEL=gemma4:e4b" \
               "LLM_MODEL=gemma4:e4b" \
+              "OLLAMA_URL=http://doqseal-prod-ollama" \
               "EXTRACTION_MODE=hybrid"
