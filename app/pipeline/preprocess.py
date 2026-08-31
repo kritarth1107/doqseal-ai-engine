@@ -108,11 +108,24 @@ def page_to_cv2(page: PageImage) -> np.ndarray:
 
 
 def guess_mime_type(path: str, fallback: str) -> str:
-    ext = Path(path).suffix.lower()
-    if ext == ".pdf" or ext.endswith(".pdf.enc"):
-        return "application/pdf"
-    if ext in {".png", ".png.enc"}:
-        return "image/png"
-    if ext in {".jpg", ".jpeg", ".jpg.enc", ".jpeg.enc"}:
-        return "image/jpeg"
-    return fallback
+    raw = Path(path).suffix.lower()
+    ext = raw[:-4] if raw.endswith(".enc") else raw
+    mapping = {
+        ".pdf": "application/pdf",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        ".bmp": "image/bmp",
+        ".tif": "image/tiff",
+        ".tiff": "image/tiff",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".doc": "application/msword",
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".xls": "application/vnd.ms-excel",
+        ".csv": "text/csv",
+        ".txt": "text/plain",
+        ".md": "text/markdown",
+    }
+    return mapping.get(ext, fallback)
