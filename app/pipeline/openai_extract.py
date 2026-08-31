@@ -60,6 +60,8 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
 
 
 def _expand_tests(value: Any) -> Any:
+    if isinstance(value, list):
+        value = ", ".join(str(v).strip() for v in value if str(v).strip())
     if not isinstance(value, str) or not value.strip():
         return value
     mapping = {
