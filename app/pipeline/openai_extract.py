@@ -146,75 +146,12 @@ Rules:
 """
 
 
-def extract_with_azure_openai(
-    project: dict[str, Any],
-    pages: list[PageImage],
-) -> dict[str, Any]:
-    if not azure_openai_configured():
-        raise RuntimeError("Azure OpenAI is not configured")
-    if not pages:
-        raise ValueError("No pages available for vision extraction")
-
-    image_b64 = _pil_to_b64_jpeg(pages[0].image)
-    prompt = _build_prompt(project)
-
-    endpoint = settings.azure_openai_endpoint.rstrip("/")
-    deployment = settings.azure_openai_deployment
-    api_version = settings.azure_openai_api_version
-    url = (
-        f"{endpoint}/openai/deployments/{deployment}/chat/completions"
-        f"?api-version={api_version}"
-    )
-
-    payload = {
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_b64}",
-                            "detail": "high",
-                        },
-                    },
-                ],
-            }
-        ],
-        "temperature": 0,
-        "max_tokens": 1200,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {
-        "api-key": settings.azure_openai_api_key,
-        "Content-Type": "application/json",
-    }
-
-    logger.info(
-        "Azure OpenAI vision extract deployment=%s detail=high",
-        deployment,
-    )
-    timeout = httpx.Timeout(connect=20.0, read=60.0, write=30.0, pool=20.0)
-    with httpx.Client(timeout=timeout) as client:
-        response = client.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        body = response.json()
-
-    content = (
-        (((body.get("choices") or [{}])[0].get("message") or {}).get("content"))
-        or ""
-    ).strip()
-    parsed = _parse_json_response(content)
-    if not parsed:
-        raise RuntimeError("Azure OpenAI returned empty/invalid JSON")
-
+def _finalize_payload(parsed: dict[str, Any], *, strategy: str) -> dict[str, Any]:
     if "tests_requested" in parsed:
         parsed["tests_requested"] = _expand_tests(parsed.get("tests_requested"))
 
-    # Drop empty strings
     cleaned = {
-        k: v
+        k: (", ".join(str(x) for x in v) if isinstance(v, list) else v)
         for k, v in parsed.items()
         if v is not None and v != ""
     }
@@ -237,5 +174,137 @@ def extract_with_azure_openai(
     return {
         "data": cleaned,
         "fieldConfidence": field_confidence,
-        "strategy": f"azure-openai:{deployment}",
+        "strategy": strategy,
     }
+
+
+def _chat_completions(messages: list[dict[str, Any]], *, max_tokens: int = 1200) -> dict[str, Any]:
+    if not azure_openai_configured():
+        raise RuntimeError("Azure OpenAI is not configured")
+
+    endpoint = settings.azure_openai_endpoint.rstrip("/")
+    deployment = settings.azure_openai_deployment
+    api_version = settings.azure_openai_api_version
+    url = (
+        f"{endpoint}/openai/deployments/{deployment}/chat/completions"
+        f"?api-version={api_version}"
+    )
+    payload = {
+        "messages": messages,
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "response_format": {"type": "json_object"},
+    }
+    headers = {
+        "api-key": settings.azure_openai_api_key,
+        "Content-Type": "application/json",
+    }
+    timeout = httpx.Timeout(connect=20.0, read=60.0, write=30.0, pool=20.0)
+    with httpx.Client(timeout=timeout) as client:
+        response = client.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        body = response.json()
+    content = (
+        (((body.get("choices") or [{}])[0].get("message") or {}).get("content"))
+        or ""
+    ).strip()
+    parsed = _parse_json_response(content)
+    if not parsed:
+        raise RuntimeError("Azure OpenAI returned empty/invalid JSON")
+    return parsed
+
+
+def extract_with_azure_openai(
+    project: dict[str, Any],
+    pages: list[PageImage],
+) -> dict[str, Any]:
+    if not pages:
+        raise ValueError("No pages available for vision extraction")
+
+    image_b64 = _pil_to_b64_jpeg(pages[0].image)
+    prompt = _build_prompt(project)
+    logger.info(
+        "Azure OpenAI vision extract deployment=%s detail=high",
+        settings.azure_openai_deployment,
+    )
+    parsed = _chat_completions(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_b64}",
+                            "detail": "high",
+                        },
+                    },
+                ],
+            }
+        ]
+    )
+    return _finalize_payload(
+        parsed, strategy=f"azure-openai:{settings.azure_openai_deployment}"
+    )
+
+
+def extract_text_with_azure_openai(
+    project: dict[str, Any],
+    document_text: str,
+    *,
+    source_label: str = "document",
+) -> dict[str, Any]:
+    """Structure plain text from PDF/Office/CSV into project fields via GPT-4o."""
+    fields = project.get("fields") or []
+    hint = (project.get("extractionHint") or "").strip()
+    name = (project.get("name") or "").strip()
+    if fields:
+        field_lines = "\n".join(
+            f'- "{f["key"]}" ({f.get("type", "string")}): {f.get("label", f["key"])}'
+            for f in fields
+            if f.get("key")
+        )
+    else:
+        field_lines = """
+- "document_type" (string|null)
+- "summary" (string)
+- "key_entities" (object): important names, dates, ids found in the text
+- "patient_name" (string|null)
+- "patient_age" (number|null)
+- "patient_gender" (string|null)
+- "client_code" (string|null)
+- "tests_requested" (string|null)
+""".strip()
+
+    prompt = f"""Extract structured JSON from this {source_label} text.
+
+Project: {name or "Documents"}
+Instructions: {hint or "Extract the most important business fields accurately."}
+
+Return ONE JSON object with these keys when present:
+{field_lines}
+- "suggested_title" (string): short human title for the document
+- "summary" (string): 1-2 sentences
+
+Rules:
+- Prefer null over guessing.
+- Expand clear lab-test abbreviations to full forms when present.
+- JSON only.
+"""
+    clipped = (document_text or "")[:50_000]
+    logger.info(
+        "Azure OpenAI text extract deployment=%s chars=%d",
+        settings.azure_openai_deployment,
+        len(clipped),
+    )
+    parsed = _chat_completions(
+        [
+            {"role": "system", "content": "You extract structured fields from documents."},
+            {"role": "user", "content": f"{prompt}\n\n--- DOCUMENT TEXT ---\n{clipped}"},
+        ]
+    )
+    return _finalize_payload(
+        parsed,
+        strategy=f"azure-openai-text:{settings.azure_openai_deployment}",
+    )

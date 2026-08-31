@@ -8,16 +8,18 @@ from typing import Any
 from app.config import settings
 from app.pipeline.ocr import ocr_result_from_text, run_ocr
 from app.pipeline.ocr_extract import extract_from_ocr
+from app.pipeline.office_extract import extract_office_text, is_office_or_text
+from app.pipeline.openai_extract import (
+    azure_openai_configured,
+    extract_text_with_azure_openai,
+    extract_with_azure_openai,
+)
 from app.pipeline.preprocess import (
     extract_pdf_text_layers,
     guess_mime_type,
     load_document_pages,
 )
 from app.pipeline.stub import generate_stub_extraction
-from app.pipeline.openai_extract import (
-    azure_openai_configured,
-    extract_with_azure_openai,
-)
 from app.pipeline.title import suggest_display_title
 from app.pipeline.validate import validate_extraction
 from app.pipeline.vlm_extract import extract_with_vlm
@@ -53,20 +55,79 @@ def _load_plaintext(document: dict[str, Any], organisation_id: str) -> tuple[byt
     return ciphertext, mime_type
 
 
-def _should_skip_vlm(
-    ocr_text: str,
-    average_confidence: float,
+def _vision_or_ocr(
+    project: dict[str, Any],
+    file_bytes: bytes,
+    mime_type: str,
     *,
+    mode: str,
     is_image: bool,
-) -> bool:
-    # Photos / scans of handwritten forms need the vision model — OCR alone is poor.
-    if is_image:
-        return False
-    text_len = len((ocr_text or "").strip())
-    return (
-        text_len >= settings.skip_vlm_min_text_chars
-        and average_confidence >= settings.skip_vlm_min_ocr_confidence
+    pdf_text: str = "",
+) -> tuple[Any, dict[str, Any]]:
+    pages = load_document_pages(file_bytes, mime_type)
+    if not pages:
+        raise ValueError("No pages could be loaded from document")
+
+    use_azure = (
+        settings.vlm_provider.lower() == "azure_openai"
+        and azure_openai_configured()
+        and mode != "ocr_only"
     )
+    fast_vision = use_azure and (is_image or settings.skip_ocr_for_vision or "pdf" in mime_type.lower())
+
+    if fast_vision:
+        ocr = _empty_ocr()
+        try:
+            extraction = extract_with_azure_openai(project, pages)
+            logger.info("Azure OpenAI GPT-4o vision extraction succeeded")
+            return ocr, extraction
+        except Exception as error:
+            logger.warning("Azure OpenAI vision failed, falling back: %s", error)
+            ocr = run_ocr(pages)
+            try:
+                extraction = extract_with_vlm(project, pages, ocr)
+            except Exception as ollama_err:
+                extraction = extract_from_ocr(project, ocr)
+                extraction["strategy"] = "ocr_fallback"
+                extraction["vlmError"] = f"{error}; {ollama_err}"
+            return ocr, extraction
+
+    ocr = run_ocr(pages)
+    logger.info(
+        "OCR complete: %d lines, avg confidence %.2f (image=%s)",
+        len(ocr.lines),
+        ocr.average_confidence,
+        is_image,
+    )
+    if pdf_text and len(pdf_text) > 40:
+        merged = f"{pdf_text}\n\n{ocr.full_text}".strip()
+        ocr = ocr_result_from_text(
+            merged,
+            confidence=max(ocr.average_confidence, 0.7),
+        )
+
+    skip_vlm = mode == "ocr_only" or (
+        not is_image
+        and len((ocr.full_text or "").strip()) >= settings.skip_vlm_min_text_chars
+        and ocr.average_confidence >= settings.skip_vlm_min_ocr_confidence
+    )
+    if skip_vlm:
+        extraction = extract_from_ocr(project, ocr)
+        if mode != "ocr_only":
+            extraction["strategy"] = "ocr_fast"
+        return ocr, extraction
+
+    try:
+        if use_azure:
+            extraction = extract_with_azure_openai(project, pages)
+        else:
+            extraction = extract_with_vlm(project, pages, ocr)
+    except Exception as error:
+        logger.warning("VLM failed, falling back to OCR-only: %s", error)
+        extraction = extract_from_ocr(project, ocr)
+        extraction["strategy"] = "ocr_fallback"
+        extraction["vlmError"] = str(error)
+    return ocr, extraction
 
 
 def run_extraction_pipeline(
@@ -96,110 +157,78 @@ def run_extraction_pipeline(
     )
 
     file_bytes, mime_type = _load_plaintext(document, organisation_id)
+    filename = str(document.get("originalFilename") or "")
+    mime_type = guess_mime_type(
+        filename or str(document.get("storagePath") or ""),
+        mime_type,
+    )
     mime_l = mime_type.lower()
     is_pdf = "pdf" in mime_l
-    is_image = any(tok in mime_l for tok in ("image/", "jpeg", "jpg", "png", "webp"))
+    is_image = any(
+        tok in mime_l
+        for tok in ("image/", "jpeg", "jpg", "png", "webp", "gif", "bmp", "tiff")
+    )
+    is_office = is_office_or_text(mime_type, filename)
 
     project = {
         **project,
-        "_documentFilename": document.get("originalFilename") or "",
+        "_documentFilename": filename,
     }
 
-    # Fast path: born-digital PDFs often have a text layer — skip EasyOCR + VLM
-    pdf_text = ""
-    pdf_pages_with_text = 0
-    if is_pdf and settings.prefer_pdf_text:
+    # 1) Word / Excel / CSV / text
+    if is_office and mode != "ocr_only":
+        office_text = extract_office_text(file_bytes, mime_type, filename)
+        ocr = ocr_result_from_text(office_text, confidence=0.95)
+        if azure_openai_configured():
+            extraction = extract_text_with_azure_openai(
+                project, office_text, source_label=filename or "office document"
+            )
+            logger.info("Office/text Azure OpenAI extraction succeeded")
+        else:
+            extraction = extract_from_ocr(project, ocr)
+            extraction["strategy"] = "office_text"
+
+    # 2) Born-digital PDF text layer
+    elif is_pdf and settings.prefer_pdf_text:
         pdf_text, pdf_pages_with_text = extract_pdf_text_layers(file_bytes)
         logger.info(
             "PDF text layer: %d chars across %d pages",
             len(pdf_text),
             pdf_pages_with_text,
         )
-
-    if (
-        is_pdf
-        and settings.prefer_pdf_text
-        and len(pdf_text) >= settings.pdf_text_min_chars
-    ):
-        ocr = ocr_result_from_text(pdf_text, confidence=0.93)
-        extraction = extract_from_ocr(project, ocr)
-        extraction["strategy"] = "pdf_text"
-        logger.info("Using PDF text-layer extraction (skipped OCR/VLM)")
-    else:
-        pages = load_document_pages(file_bytes, mime_type)
-        if not pages:
-            raise ValueError("No pages could be loaded from document")
-
-        use_azure = (
-            settings.vlm_provider.lower() == "azure_openai"
-            and azure_openai_configured()
-            and mode != "ocr_only"
-        )
-        # Fast handwritten/image path: GPT-4o only (skip EasyOCR) → target <10s
-        fast_vision = use_azure and (
-            is_image or settings.skip_ocr_for_vision
-        )
-
-        if fast_vision:
-            ocr = _empty_ocr()
-            try:
-                extraction = extract_with_azure_openai(project, pages)
-                logger.info("Azure OpenAI GPT-4o extraction succeeded")
-            except Exception as error:
-                logger.warning(
-                    "Azure OpenAI failed, falling back to OCR/Ollama: %s", error
+        if len(pdf_text) >= settings.pdf_text_min_chars:
+            ocr = ocr_result_from_text(pdf_text, confidence=0.93)
+            if azure_openai_configured() and mode != "ocr_only":
+                extraction = extract_text_with_azure_openai(
+                    project, pdf_text, source_label=filename or "pdf"
                 )
-                ocr = run_ocr(pages)
-                try:
-                    extraction = extract_with_vlm(project, pages, ocr)
-                except Exception as ollama_err:
-                    extraction = extract_from_ocr(project, ocr)
-                    extraction["strategy"] = "ocr_fallback"
-                    extraction["vlmError"] = f"{error}; {ollama_err}"
-        else:
-            ocr = run_ocr(pages)
-            logger.info(
-                "OCR complete: %d lines, avg confidence %.2f (image=%s)",
-                len(ocr.lines),
-                ocr.average_confidence,
-                is_image,
-            )
-
-            if pdf_text and len(pdf_text) > 40:
-                merged = f"{pdf_text}\n\n{ocr.full_text}".strip()
-                ocr = ocr_result_from_text(
-                    merged,
-                    confidence=max(ocr.average_confidence, 0.7),
-                )
-
-            skip_vlm = mode == "ocr_only" or _should_skip_vlm(
-                ocr.full_text,
-                ocr.average_confidence,
-                is_image=is_image,
-            )
-
-            if skip_vlm:
-                extraction = extract_from_ocr(project, ocr)
-                if mode != "ocr_only":
-                    extraction["strategy"] = "ocr_fast"
-                    logger.info(
-                        "Skipping VLM (text=%d chars, conf=%.2f)",
-                        len(ocr.full_text or ""),
-                        ocr.average_confidence,
-                    )
+                logger.info("PDF text + Azure OpenAI structuring succeeded")
             else:
-                try:
-                    if use_azure:
-                        extraction = extract_with_azure_openai(project, pages)
-                        logger.info("Azure OpenAI GPT-4o extraction succeeded")
-                    else:
-                        extraction = extract_with_vlm(project, pages, ocr)
-                        logger.info("Ollama VLM extraction succeeded")
-                except Exception as error:
-                    logger.warning("VLM failed, falling back to OCR-only: %s", error)
-                    extraction = extract_from_ocr(project, ocr)
-                    extraction["strategy"] = "ocr_fallback"
-                    extraction["vlmError"] = str(error)
+                extraction = extract_from_ocr(project, ocr)
+                extraction["strategy"] = "pdf_text"
+        else:
+            ocr, extraction = _vision_or_ocr(
+                project,
+                file_bytes,
+                mime_type,
+                mode=mode,
+                is_image=False,
+                pdf_text=pdf_text,
+            )
+
+    # 3) Images / scans / remaining PDFs
+    else:
+        if not (is_pdf or is_image):
+            raise ValueError(
+                f"Unsupported file type for extraction: {mime_type or filename or 'unknown'}"
+            )
+        ocr, extraction = _vision_or_ocr(
+            project,
+            file_bytes,
+            mime_type,
+            mode=mode,
+            is_image=is_image,
+        )
 
     validated = validate_extraction(
         extraction.get("data", {}),
@@ -210,7 +239,7 @@ def run_extraction_pipeline(
 
     display_title = suggest_display_title(
         validated.get("data"),
-        original_filename=str(document.get("originalFilename") or ""),
+        original_filename=filename,
         ocr_text=ocr.full_text or "",
     )
     if display_title and isinstance(validated.get("data"), dict):
