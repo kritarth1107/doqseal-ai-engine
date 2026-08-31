@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Avoid torch/transformers dynamo clash that breaks VLM + sentence-transformers
+export TORCHDYNAMO_DISABLE="${TORCHDYNAMO_DISABLE:-1}"
+export TORCH_COMPILE_DISABLE="${TORCH_COMPILE_DISABLE:-1}"
+
 # Run extraction worker in background; FastAPI health/chat in foreground
 python -m app.worker &
 WORKER_PID=$!

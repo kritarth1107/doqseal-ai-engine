@@ -15,6 +15,16 @@ _model: SentenceTransformer | None = None
 def _get_model() -> SentenceTransformer:
     global _model
     if _model is None:
+        import os
+
+        os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
+        os.environ.setdefault("TORCH_COMPILE_DISABLE", "1")
+        try:
+            import torch
+
+            torch._dynamo.config.disable = True  # type: ignore[attr-defined]
+        except Exception:
+            pass
         from sentence_transformers import SentenceTransformer
 
         _model = SentenceTransformer(settings.embedding_model)

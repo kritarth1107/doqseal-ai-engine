@@ -45,7 +45,15 @@ def _load_plaintext(document: dict[str, Any], organisation_id: str) -> tuple[byt
     return ciphertext, mime_type
 
 
-def _should_skip_vlm(ocr_text: str, average_confidence: float) -> bool:
+def _should_skip_vlm(
+    ocr_text: str,
+    average_confidence: float,
+    *,
+    is_image: bool,
+) -> bool:
+    # Photos / scans of handwritten forms need the vision model — OCR alone is poor.
+    if is_image:
+        return False
     text_len = len((ocr_text or "").strip())
     return (
         text_len >= settings.skip_vlm_min_text_chars
@@ -80,7 +88,9 @@ def run_extraction_pipeline(
     )
 
     file_bytes, mime_type = _load_plaintext(document, organisation_id)
-    is_pdf = "pdf" in mime_type.lower()
+    mime_l = mime_type.lower()
+    is_pdf = "pdf" in mime_l
+    is_image = any(tok in mime_l for tok in ("image/", "jpeg", "jpg", "png", "webp"))
 
     project = {
         **project,
@@ -114,9 +124,10 @@ def run_extraction_pipeline(
 
         ocr = run_ocr(pages)
         logger.info(
-            "OCR complete: %d lines, avg confidence %.2f",
+            "OCR complete: %d lines, avg confidence %.2f (image=%s)",
             len(ocr.lines),
             ocr.average_confidence,
+            is_image,
         )
 
         # If PDF had a weak text layer, merge it as a hint for OCR extract
@@ -127,7 +138,13 @@ def run_extraction_pipeline(
                 confidence=max(ocr.average_confidence, 0.7),
             )
 
-        if mode == "ocr_only" or _should_skip_vlm(ocr.full_text, ocr.average_confidence):
+        skip_vlm = mode == "ocr_only" or _should_skip_vlm(
+            ocr.full_text,
+            ocr.average_confidence,
+            is_image=is_image,
+        )
+
+        if skip_vlm:
             extraction = extract_from_ocr(project, ocr)
             if mode != "ocr_only":
                 extraction["strategy"] = "ocr_fast"

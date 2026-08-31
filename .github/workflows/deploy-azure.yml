@@ -60,4 +60,6 @@ jobs:
               "GIT_SHA=${GITHUB_SHA}" \
               "HF_HOME=/models/huggingface" \
               "TRANSFORMERS_CACHE=/models/huggingface/hub" \
-              "NVIDIA_VISIBLE_DEVICES=all"
+              "NVIDIA_VISIBLE_DEVICES=all" \
+              "TORCHDYNAMO_DISABLE=1" \
+              "TORCH_COMPILE_DISABLE=1"

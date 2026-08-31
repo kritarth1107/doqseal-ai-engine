@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any
+
+# Must run before importing torch/transformers — otherwise VLM load crashes with
+# "Duplicate dispatch rule for <built-in function intern>"
+os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
+os.environ.setdefault("TORCH_COMPILE_DISABLE", "1")
 
 from app.config import settings
 from app.pipeline.ocr import OcrResult
@@ -18,13 +24,30 @@ _vlm_processor = None
 _vlm_load_failed = False
 
 
+def _looks_like_trf(ocr_text: str, hint: str) -> bool:
+    blob = f"{ocr_text}\n{hint}".lower()
+    markers = (
+        "requisition",
+        "trf",
+        "patient name",
+        "specimen",
+        "test requirements",
+        "uhid",
+        "diagnostic",
+    )
+    return sum(1 for m in markers if m in blob) >= 2
+
+
 def _build_schema_prompt(project: dict[str, Any], ocr: OcrResult) -> str:
     fields = project.get("fields") or []
     hint = (project.get("extractionHint") or "").strip()
     description = (project.get("description") or "").strip()
     ocr_preview = ocr.full_text[:4000] if ocr.full_text else "No OCR text detected."
     in_project = bool(project.get("projectId"))
-    project_name = project.get("name") or ("Organisation Drive" if not in_project else "Project")
+    project_name = project.get("name") or (
+        "Organisation Drive" if not in_project else "Project"
+    )
+    trf_mode = _looks_like_trf(ocr.full_text or "", hint)
 
     if fields:
         field_lines = []
@@ -36,43 +59,85 @@ def _build_schema_prompt(project: dict[str, Any], ocr: OcrResult) -> str:
             )
         schema_block = "\n".join(field_lines)
         schema_block += """
-- "suggested_title" (string): Short human-readable title for this file (what it is about)
-- "summary" (string): 1-3 sentence summary of the document contents
+- "suggested_title" (string): Short human-readable title for this file
+- "summary" (string): 1-3 sentence summary
 - "pages" (array, optional): [{ "page": 1, "title": "...", "summary": "..." }]
+"""
+    elif trf_mode:
+        schema_block = """
+- "document_type" (string): e.g. "Test Requisition Form"
+- "lab_name" (string|null): Diagnostics / lab brand if visible
+- "patient" (object): {
+    "name": string|null,
+    "age": number|null,
+    "gender": "M"|"F"|string|null,
+    "uhid": string|null,
+    "phone": string|null,
+    "address": string|null
+  }
+- "client" (object): {
+    "code": string|null,
+    "name": string|null,
+    "referring_doctor": string|null
+  }
+- "specimen" (object): {
+    "drawn_date": string|null,
+    "drawn_time": string|null,
+    "fasting": boolean|null,
+    "types": array of checked specimen type labels
+  }
+- "tests" (array): [{ "code": string|null, "description": string, "amount": number|null }]
+- "clinical_history" (string|null)
+- "verification" (object): stamps/signatures present as booleans when visible
+- "suggested_title" (string): Patient name + form type when possible
+- "summary" (string): 2-3 sentences covering patient, tests, lab
+- "key_entities" (object): flat map of the most important fields
+- "pointers" (array): [{ "label": "...", "value": "...", "page": 1 }]
+- "checklist" (object): map extraction-context labels → values when provided
+- "auto_tags" (array of strings)
 """
     else:
         schema_block = """
-- "suggested_title" (string): Short clear title a user would recognize (who/what the document is about)
-- "summary" (string): What the document contains (2-4 sentences), inferred only from the pages
-- "key_entities" (object): Important named values found in the document
-- "checklist" (object): For each item in the project extraction context, map label → found value, true/false for stamps/presence, or null if missing
-- "pointers" (array): Key facts as [{ "label": "...", "value": "...", "page": 1 }]
-- "pages" (array): [{ "page": number, "title": heading from that page, "summary": what it covers }]
-- "auto_tags" (array of strings): Useful search tags derived from content
+- "suggested_title" (string): Short clear title
+- "summary" (string): 2-4 sentences
+- "key_entities" (object): Important named values
+- "checklist" (object): extraction-context labels → values when provided
+- "pointers" (array): [{ "label": "...", "value": "...", "page": 1 }]
+- "pages" (array): [{ "page": number, "title": "...", "summary": "..." }]
+- "auto_tags" (array of strings)
 """
 
     if in_project and hint:
         scope = (
             f"This file belongs to project «{project_name}».\n"
-            f"PRIMARY EXTRACTION CONTEXT (follow this closely — extract/verify every item):\n"
-            f"{hint}\n"
-            f"{'Project description: ' + description if description else ''}"
+            f"PRIMARY EXTRACTION CONTEXT (follow closely):\n{hint}\n"
+            f"{('Project description: ' + description) if description else ''}"
         )
     elif in_project:
         scope = (
-            f"This file belongs to project «{project_name}». "
-            f"Use the project description when deciding which pointers matter.\n"
-            f"Project description: {description or 'No extra hint — rely on the document itself.'}"
+            f"This file belongs to project «{project_name}».\n"
+            f"Project description: {description or 'Rely on the document itself.'}"
         )
     else:
         scope = (
-            "This file was uploaded to Organisation Drive (no project). "
-            "Read the document and extract whatever it actually contains — "
-            "do not assume a category in advance."
+            "This file is from Organisation Drive. "
+            "Read the page carefully — including handwritten values."
         )
 
+    trf_rules = ""
+    if trf_mode:
+        trf_rules = """
+TRF / requisition rules:
+- Prefer handwritten filled values over blank printed labels.
+- Read Patient Name, Age, Gender/Sex, Client Code, and every Test Description row.
+- Gender: use the checked checkbox (Male/Female).
+- tests[] must list each handwritten test (e.g. B group, TFT, HBsAg).
+- Do not invent values for empty fields — use null.
+"""
+
     return f"""You are DoqSeal's document intelligence extractor.
-Read the document first. Infer what it is from its own content. Extract useful structured pointers.
+You are given the document IMAGE plus noisy OCR reference text.
+Trust the IMAGE for handwriting; use OCR only as a weak hint.
 
 {scope}
 
@@ -80,17 +145,15 @@ Return ONLY a valid JSON object with these keys:
 {schema_block}
 
 Rules:
-- When extraction context is provided, prioritize those fields/checklist items over general extraction.
-- Do not assume a document category before reading the content.
-- Do not invent labels or facts that are not supported by the document or OCR.
-- Prefer concrete entities, identifiers, dates, amounts, parties, and clauses that appear in the text.
-- Use Hindi or English as present in the source.
-- For boolean stamp/signature fields, use true if visible/present else false.
+- Extract facts that are visible on the page.
+- Prefer concrete entities: names, ages, codes, test names, dates, phones.
+- For boolean stamp/signature fields, true if visible else false.
 - For numbers, return numeric JSON values not strings.
-- If a field is missing, use null or omit it.
-- suggested_title must help a user recognize the file at a glance.
+- If a field is missing/blank, use null.
+- suggested_title must help a user recognize the file.
+{trf_rules}
 
-OCR reference text:
+OCR reference text (may be wrong — verify against the image):
 {ocr_preview}
 """
 
@@ -119,6 +182,12 @@ def _load_vlm():
         return _vlm_model, _vlm_processor
 
     import torch
+
+    try:
+        torch._dynamo.config.disable = True  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
     from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
     model_id = settings.vlm_model
@@ -206,7 +275,7 @@ def extract_with_vlm(
     with torch.no_grad():
         generated = model.generate(
             **inputs,
-            max_new_tokens=1024,
+            max_new_tokens=1400,
             temperature=0.1,
             do_sample=False,
         )
@@ -220,7 +289,7 @@ def extract_with_vlm(
 
     parsed = _parse_json_response(response)
     field_confidence = {
-        key: round(min(0.97, max(0.65, ocr.average_confidence + 0.1)), 2)
+        key: round(min(0.97, max(0.7, ocr.average_confidence + 0.2)), 2)
         for key, value in parsed.items()
         if value is not None
     }
@@ -229,5 +298,4 @@ def extract_with_vlm(
         "data": parsed,
         "fieldConfidence": field_confidence,
         "strategy": "hybrid",
-        "rawModelPreview": response[:500],
     }
