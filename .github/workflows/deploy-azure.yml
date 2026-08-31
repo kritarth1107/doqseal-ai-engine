@@ -55,7 +55,7 @@ jobs:
             --workload-profile-name "$WORKLOAD_PROFILE" \
             --cpu 8 \
             --memory 56Gi \
-            --min-replicas 0 \
+            --min-replicas 1 \
             --set-env-vars \
               "GIT_SHA=${GITHUB_SHA}" \
               "HF_HOME=/models/huggingface" \
