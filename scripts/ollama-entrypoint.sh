@@ -21,8 +21,21 @@ for _ in $(seq 1 90); do
   sleep 2
 done
 
-echo "Ensuring model is available: ${MODEL}"
-ollama pull "${MODEL}"
+# Pull in the background so Azure readiness probes can pass while the
+# (~5–10GB) multimodal weights download. Requests will 404 until ready.
+echo "Ensuring model is available (background): ${MODEL}"
+(
+  set +e
+  for attempt in 1 2 3 4 5; do
+    echo "ollama pull attempt ${attempt}: ${MODEL}"
+    if ollama pull "${MODEL}"; then
+      echo "Ollama model ready: ${MODEL}"
+      exit 0
+    fi
+    sleep 15
+  done
+  echo "ERROR: failed to pull ${MODEL}" >&2
+  exit 1
+) &
 
-echo "Ollama ready with model ${MODEL}"
 wait "$OLLAMA_PID"
