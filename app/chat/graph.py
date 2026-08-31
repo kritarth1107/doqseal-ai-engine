@@ -14,8 +14,8 @@ from app.config import settings
 logger = logging.getLogger("doqseal.chat.graph")
 
 STUB_ANSWER = (
-    "I'm running in stub mode because the local LLM (Ollama) is unavailable. "
-    "Start Ollama with the configured Qwen model to get live answers grounded "
+    "I'm running in stub mode because no chat LLM is available. "
+    "Configure Azure OpenAI (GPT-4o) or Ollama to get live answers grounded "
     "in your indexed documents."
 )
 
@@ -53,6 +53,46 @@ def _build_prompt(message: str, context: list[dict[str, Any]]) -> str:
     )
 
 
+def _call_azure_openai_chat(prompt: str) -> str | None:
+    endpoint = (settings.azure_openai_endpoint or "").rstrip("/")
+    key = settings.azure_openai_api_key or ""
+    deployment = settings.azure_openai_deployment or "gpt-4o"
+    if not endpoint or not key:
+        return None
+    url = (
+        f"{endpoint}/openai/deployments/{deployment}/chat/completions"
+        f"?api-version={settings.azure_openai_api_version}"
+    )
+    payload = {
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are DoqSeal, a precise document intelligence assistant.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 800,
+    }
+    try:
+        with httpx.Client(timeout=45.0) as client:
+            response = client.post(
+                url,
+                headers={"api-key": key, "Content-Type": "application/json"},
+                json=payload,
+            )
+            response.raise_for_status()
+            body = response.json()
+            text = (
+                ((body.get("choices") or [{}])[0].get("message") or {}).get("content")
+                or ""
+            ).strip()
+            return text or None
+    except Exception as exc:
+        logger.warning("Azure OpenAI chat failed: %s", exc)
+        return None
+
+
 def _call_ollama(prompt: str) -> str | None:
     url = f"{settings.ollama_url.rstrip('/')}/api/generate"
     payload = {
@@ -84,6 +124,10 @@ def retrieve_node(state: ChatState) -> dict[str, Any]:
 
 def generate_node(state: ChatState) -> dict[str, Any]:
     prompt = _build_prompt(state["message"], state.get("context") or [])
+    # Prefer Azure OpenAI for chat; fall back to Ollama if configured.
+    answer = _call_azure_openai_chat(prompt)
+    if answer:
+        return {"answer": answer, "mode": "live"}
     answer = _call_ollama(prompt)
     if answer:
         return {"answer": answer, "mode": "live"}

@@ -14,6 +14,10 @@ from app.pipeline.preprocess import (
     load_document_pages,
 )
 from app.pipeline.stub import generate_stub_extraction
+from app.pipeline.openai_extract import (
+    azure_openai_configured,
+    extract_with_azure_openai,
+)
 from app.pipeline.title import suggest_display_title
 from app.pipeline.validate import validate_extraction
 from app.pipeline.vlm_extract import extract_with_vlm
@@ -21,6 +25,10 @@ from app.utils.blob_storage import load_ciphertext
 from app.utils.decrypt import decrypt_document_file
 
 logger = logging.getLogger("doqseal.pipeline")
+
+
+def _empty_ocr():
+    return ocr_result_from_text("", confidence=0.0)
 
 
 def _load_plaintext(document: dict[str, Any], organisation_id: str) -> tuple[bytes, str]:
@@ -122,46 +130,76 @@ def run_extraction_pipeline(
         if not pages:
             raise ValueError("No pages could be loaded from document")
 
-        ocr = run_ocr(pages)
-        logger.info(
-            "OCR complete: %d lines, avg confidence %.2f (image=%s)",
-            len(ocr.lines),
-            ocr.average_confidence,
-            is_image,
+        use_azure = (
+            settings.vlm_provider.lower() == "azure_openai"
+            and azure_openai_configured()
+            and mode != "ocr_only"
+        )
+        # Fast handwritten/image path: GPT-4o only (skip EasyOCR) → target <10s
+        fast_vision = use_azure and (
+            is_image or settings.skip_ocr_for_vision
         )
 
-        # If PDF had a weak text layer, merge it as a hint for OCR extract
-        if pdf_text and len(pdf_text) > 40:
-            merged = f"{pdf_text}\n\n{ocr.full_text}".strip()
-            ocr = ocr_result_from_text(
-                merged,
-                confidence=max(ocr.average_confidence, 0.7),
+        if fast_vision:
+            ocr = _empty_ocr()
+            try:
+                extraction = extract_with_azure_openai(project, pages)
+                logger.info("Azure OpenAI GPT-4o extraction succeeded")
+            except Exception as error:
+                logger.warning(
+                    "Azure OpenAI failed, falling back to OCR/Ollama: %s", error
+                )
+                ocr = run_ocr(pages)
+                try:
+                    extraction = extract_with_vlm(project, pages, ocr)
+                except Exception as ollama_err:
+                    extraction = extract_from_ocr(project, ocr)
+                    extraction["strategy"] = "ocr_fallback"
+                    extraction["vlmError"] = f"{error}; {ollama_err}"
+        else:
+            ocr = run_ocr(pages)
+            logger.info(
+                "OCR complete: %d lines, avg confidence %.2f (image=%s)",
+                len(ocr.lines),
+                ocr.average_confidence,
+                is_image,
             )
 
-        skip_vlm = mode == "ocr_only" or _should_skip_vlm(
-            ocr.full_text,
-            ocr.average_confidence,
-            is_image=is_image,
-        )
-
-        if skip_vlm:
-            extraction = extract_from_ocr(project, ocr)
-            if mode != "ocr_only":
-                extraction["strategy"] = "ocr_fast"
-                logger.info(
-                    "Skipping VLM (text=%d chars, conf=%.2f)",
-                    len(ocr.full_text or ""),
-                    ocr.average_confidence,
+            if pdf_text and len(pdf_text) > 40:
+                merged = f"{pdf_text}\n\n{ocr.full_text}".strip()
+                ocr = ocr_result_from_text(
+                    merged,
+                    confidence=max(ocr.average_confidence, 0.7),
                 )
-        else:
-            try:
-                extraction = extract_with_vlm(project, pages, ocr)
-                logger.info("VLM extraction succeeded")
-            except Exception as error:
-                logger.warning("VLM failed, falling back to OCR-only: %s", error)
+
+            skip_vlm = mode == "ocr_only" or _should_skip_vlm(
+                ocr.full_text,
+                ocr.average_confidence,
+                is_image=is_image,
+            )
+
+            if skip_vlm:
                 extraction = extract_from_ocr(project, ocr)
-                extraction["strategy"] = "ocr_fallback"
-                extraction["vlmError"] = str(error)
+                if mode != "ocr_only":
+                    extraction["strategy"] = "ocr_fast"
+                    logger.info(
+                        "Skipping VLM (text=%d chars, conf=%.2f)",
+                        len(ocr.full_text or ""),
+                        ocr.average_confidence,
+                    )
+            else:
+                try:
+                    if use_azure:
+                        extraction = extract_with_azure_openai(project, pages)
+                        logger.info("Azure OpenAI GPT-4o extraction succeeded")
+                    else:
+                        extraction = extract_with_vlm(project, pages, ocr)
+                        logger.info("Ollama VLM extraction succeeded")
+                except Exception as error:
+                    logger.warning("VLM failed, falling back to OCR-only: %s", error)
+                    extraction = extract_from_ocr(project, ocr)
+                    extraction["strategy"] = "ocr_fallback"
+                    extraction["vlmError"] = str(error)
 
     validated = validate_extraction(
         extraction.get("data", {}),

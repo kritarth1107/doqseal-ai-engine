@@ -23,9 +23,20 @@ class Settings:
 
     # Extraction pipeline
     extraction_mode: str = os.getenv("EXTRACTION_MODE", "hybrid")  # hybrid | ocr_only | stub
-    # Vision via Ollama multimodal. Default: Qwen3-VL 8B (best open form/OCR).
+    # Vision via Azure OpenAI GPT-4o (default) or Ollama multimodal fallback.
+    vlm_provider: str = os.getenv("VLM_PROVIDER", "azure_openai")  # azure_openai | ollama
     vlm_model: str = os.getenv("VLM_MODEL", "qwen3-vl:8b")
     vlm_use_4bit: bool = os.getenv("VLM_USE_4BIT", "true").lower() == "true"
+    azure_openai_endpoint: str = os.getenv("AZURE_OPENAI_ENDPOINT", "")
+    azure_openai_api_key: str = os.getenv("AZURE_OPENAI_API_KEY", "")
+    azure_openai_deployment: str = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+    azure_openai_api_version: str = os.getenv(
+        "AZURE_OPENAI_API_VERSION", "2024-08-01-preview"
+    )
+    # When true, handwritten/image TRFs skip EasyOCR and go straight to GPT-4o.
+    skip_ocr_for_vision: bool = (
+        os.getenv("SKIP_OCR_FOR_VISION", "true").lower() == "true"
+    )
     max_pdf_pages: int = int(os.getenv("MAX_PDF_PAGES", "3"))
     ocr_languages: str = os.getenv("OCR_LANGUAGES", "en,hi")
     confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.75"))

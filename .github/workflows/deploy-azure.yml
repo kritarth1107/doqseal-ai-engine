@@ -1,5 +1,6 @@
 # Deploys AI engine to Azure Container Apps via OIDC (AZURE_* repo secrets).
-# Production image is CUDA (Dockerfile.gpu) on the gpu-t4 workload profile.
+# CPU image (Dockerfile) — vision extraction uses Azure OpenAI GPT-4o.
+# RAG indexing stays on Qdrant + local embeddings.
 name: Deploy to Azure Container Apps
 
 on:
@@ -19,7 +20,8 @@ env:
   RESOURCE_GROUP: doqseal-prod-rg
   CONTAINER_APP_NAME: doqseal-prod-ai-engine
   IMAGE_NAME: doqseal-ai-engine
-  WORKLOAD_PROFILE: gpu-t4
+  WORKLOAD_PROFILE: Consumption
+  KEY_VAULT_NAME: doqseal-prod-kv
 
 jobs:
   build-and-deploy:
@@ -35,35 +37,47 @@ jobs:
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Build and push CUDA image to ACR
+      - name: Build and push CPU image to ACR
         run: |
           az acr build \
             --registry "$ACR_NAME" \
             --resource-group "$RESOURCE_GROUP" \
             --image "${IMAGE_NAME}:${GITHUB_SHA}" \
             --image "${IMAGE_NAME}:latest" \
-            --file Dockerfile.gpu \
+            --file Dockerfile \
             . \
             --no-logs
 
-      - name: Deploy Container App (GPU profile)
+      - name: Wire Azure OpenAI secrets from Key Vault
+        run: |
+          az containerapp secret set \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --secrets \
+              azure-openai-endpoint=keyvaultref:https://${KEY_VAULT_NAME}.vault.azure.net/secrets/AZURE-OPENAI-ENDPOINT,identityref:system \
+              azure-openai-api-key=keyvaultref:https://${KEY_VAULT_NAME}.vault.azure.net/secrets/AZURE-OPENAI-API-KEY,identityref:system \
+              azure-openai-deployment=keyvaultref:https://${KEY_VAULT_NAME}.vault.azure.net/secrets/AZURE-OPENAI-DEPLOYMENT,identityref:system \
+              azure-openai-api-version=keyvaultref:https://${KEY_VAULT_NAME}.vault.azure.net/secrets/AZURE-OPENAI-API-VERSION,identityref:system
+
+      - name: Deploy Container App (CPU Consumption)
         run: |
           az containerapp update \
             --name "$CONTAINER_APP_NAME" \
             --resource-group "$RESOURCE_GROUP" \
             --image "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${GITHUB_SHA}" \
             --workload-profile-name "$WORKLOAD_PROFILE" \
-            --cpu 8 \
-            --memory 56Gi \
+            --cpu 2.0 \
+            --memory 4Gi \
             --min-replicas 1 \
+            --max-replicas 3 \
             --set-env-vars \
               "GIT_SHA=${GITHUB_SHA}" \
-              "HF_HOME=/models/huggingface" \
-              "TRANSFORMERS_CACHE=/models/huggingface/hub" \
-              "NVIDIA_VISIBLE_DEVICES=all" \
-              "TORCHDYNAMO_DISABLE=1" \
-              "TORCH_COMPILE_DISABLE=1" \
-              "VLM_MODEL=qwen3-vl:8b" \
-              "LLM_MODEL=qwen3-vl:8b" \
-              "OLLAMA_URL=http://doqseal-prod-ollama" \
-              "EXTRACTION_MODE=hybrid"
+              "VLM_PROVIDER=azure_openai" \
+              "AZURE_OPENAI_ENDPOINT=secretref:azure-openai-endpoint" \
+              "AZURE_OPENAI_API_KEY=secretref:azure-openai-api-key" \
+              "AZURE_OPENAI_DEPLOYMENT=secretref:azure-openai-deployment" \
+              "AZURE_OPENAI_API_VERSION=secretref:azure-openai-api-version" \
+              "SKIP_OCR_FOR_VISION=true" \
+              "EXTRACTION_MODE=hybrid" \
+              "WARMUP_VLM=false" \
+              "WARMUP_MODELS=true"

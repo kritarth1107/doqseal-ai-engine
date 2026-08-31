@@ -49,7 +49,21 @@ def health():
     except Exception:
         checks["ollama"] = "down"
 
-    if checks.get("ollama") == "down" and status == "ok":
+    if (
+        (settings.azure_openai_endpoint or "").strip()
+        and (settings.azure_openai_api_key or "").strip()
+    ):
+        checks["azure_openai"] = "configured"
+    else:
+        checks["azure_openai"] = "missing"
+        if checks.get("ollama") == "down" and status == "ok":
+            status = "degraded"
+
+    if (
+        checks.get("azure_openai") != "configured"
+        and checks.get("ollama") == "down"
+        and status == "ok"
+    ):
         status = "degraded"
 
     return {
