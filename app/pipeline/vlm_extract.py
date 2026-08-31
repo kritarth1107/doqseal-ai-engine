@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import re
+import time
 from typing import Any
 
 import httpx
@@ -190,12 +191,27 @@ def _call_ollama_vision(prompt: str, image_b64: str) -> str:
             }
         ],
     }
-    timeout = httpx.Timeout(connect=30.0, read=300.0, write=60.0, pool=30.0)
+    # Cold-load of gemma4:e4b + first vision pass can take several minutes.
+    timeout = httpx.Timeout(connect=120.0, read=600.0, write=120.0, pool=60.0)
     logger.info("Ollama vision extract model=%s url=%s", model, url)
-    with httpx.Client(timeout=timeout) as client:
-        response = client.post(url, json=payload)
-        response.raise_for_status()
-        body = response.json()
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(url, json=payload)
+                response.raise_for_status()
+                body = response.json()
+            break
+        except Exception as err:
+            last_error = err
+            logger.warning(
+                "Ollama vision attempt %d/3 failed: %s", attempt, err
+            )
+            if attempt < 3:
+                time.sleep(5 * attempt)
+    else:
+        assert last_error is not None
+        raise last_error
     message = body.get("message") or {}
     content = (message.get("content") or body.get("response") or "").strip()
     if not content:
