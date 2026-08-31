@@ -387,71 +387,102 @@ def extract_with_vlm(
         raise ValueError("No pages available for vision extraction")
 
     handwritten = _is_handwritten_form(project, ocr)
-    # OCR destroys handwritten TRFs — do not feed it as content.
-    use_ocr_hint = not handwritten
-    prompt = _build_schema_prompt(project, ocr, use_ocr_hint=use_ocr_hint)
     images = _images_for_vlm(pages[0])
-    raw = _call_ollama_vision(prompt, images)
-    try:
-        parsed = _parse_json_response(raw)
-    except Exception as err:
-        logger.warning(
-            "First JSON parse failed (%s); retrying vision once",
-            err,
-        )
-        retry_prompt = (
-            prompt
-            + "\n\nReply with one minified JSON object only. "
-            "Null for blank fields. No markdown."
-        )
-        raw = _call_ollama_vision(retry_prompt, images)
-        parsed = _parse_json_response(raw)
+    top_mid = images[1:3] if len(images) >= 3 else images
 
-    parsed = _sanitize_extraction(parsed)
+    # Pass 1 — core TRF fields only (name, age, gender, tests). Highest priority.
+    core_prompt = """You are reading a Lupin Diagnostics Test Requisition Form photo.
+Photo 1 = top of form (Patient Information). Photo 2 = Test Requirements table.
 
-    # If name still missing/garbage, one focused retry on the top/mid crops
+Transcribe ONLY what is written in blue/black HANDWRITTEN ink or clearly checked boxes.
+
+Return JSON with exactly these keys:
+- "patient_name" (string|null): full name from the Patient Name box, letter by letter
+- "patient_age" (number|null): number next to Yrs / Months
+- "patient_gender" (string|null): "Male" or "Female" from the checked box only
+- "tests_requested" (string|null): each handwritten line under Test Description,
+  comma-separated. Expand clear short forms when obvious from the ink
+  (Creat→Creatinine, Cbsc/CBC→CBC, Lipid pr→Lipid Profile). Never invent tests.
+- "lab_name" (string|null): printed lab brand if visible (e.g. Lupin Diagnostics)
+
+Rules:
+- Prefer null over guessing.
+- Ignore Specimen Type checkboxes (Serum, EDTA, Urine…) — those are NOT tests.
+- Ignore printed purple labels. Do not copy OCR gibberish.
+- One minified JSON object only.
+"""
+    logger.info("Core TRF vision pass (name/age/gender/tests)")
+    core_raw = _call_ollama_vision(core_prompt, top_mid)
+    parsed = _sanitize_extraction(_parse_json_response(core_raw))
+
+    # Pass 2 — fill remaining project schema fields if configured
+    fields = project.get("fields") or []
+    core_keys = {
+        "patient_name",
+        "patient_age",
+        "patient_gender",
+        "tests_requested",
+        "lab_name",
+    }
+    extra_fields = [
+        f for f in fields if f.get("key") and f["key"] not in core_keys
+    ]
+    if extra_fields or (not parsed.get("patient_name") and handwritten):
+        use_ocr_hint = not handwritten
+        prompt = _build_schema_prompt(project, ocr, use_ocr_hint=use_ocr_hint)
+        try:
+            raw = _call_ollama_vision(prompt, images)
+            full = _sanitize_extraction(_parse_json_response(raw))
+            # Core fields from pass 1 win unless empty
+            for key, val in full.items():
+                if key in core_keys and parsed.get(key) not in (None, ""):
+                    continue
+                if val is not None and val != "":
+                    parsed[key] = val
+            parsed = _sanitize_extraction(parsed)
+        except Exception as err:
+            logger.warning("Full schema vision pass failed: %s", err)
+
+    # Pass 3 — retry core if name or tests still missing
     if handwritten and (
         not parsed.get("patient_name")
         or _looks_like_ocr_garbage(str(parsed.get("patient_name") or ""))
+        or not parsed.get("tests_requested")
     ):
-        logger.info("Retrying patient/tests focused pass")
-        focus_prompt = (
-            "Photo 1 is the top of a Lupin TRF (patient + client). "
-            "Photo 2 is the test-requirements area. "
-            "Return JSON with patient_name, patient_age, patient_gender, "
-            "client_code, tests_requested only. "
-            "Read blue ink carefully. Null if blank. No other keys. "
-            "Do not invent tests."
-        )
-        focus_images = images[1:3] if len(images) >= 3 else images
+        logger.info("Retry core TRF fields")
         try:
-            focus_raw = _call_ollama_vision(focus_prompt, focus_images)
-            focus = _sanitize_extraction(_parse_json_response(focus_raw))
+            retry_raw = _call_ollama_vision(
+                core_prompt
+                + "\nRead the ink again carefully. patient_name and tests_requested are required when ink exists.",
+                top_mid,
+            )
+            retry = _sanitize_extraction(_parse_json_response(retry_raw))
             for key in (
                 "patient_name",
                 "patient_age",
                 "patient_gender",
-                "client_code",
                 "tests_requested",
+                "lab_name",
             ):
-                val = focus.get(key)
-                if val is not None and val != "":
-                    if key == "patient_name" and _looks_like_ocr_garbage(str(val)):
-                        continue
+                val = retry.get(key)
+                if val is None or val == "":
+                    continue
+                if key == "patient_name" and _looks_like_ocr_garbage(str(val)):
+                    continue
+                if not parsed.get(key):
                     parsed[key] = val
             parsed = _sanitize_extraction(parsed)
         except Exception as focus_err:
-            logger.warning("Focused vision pass failed: %s", focus_err)
+            logger.warning("Core retry failed: %s", focus_err)
 
     field_confidence = {
         key: round(min(0.97, max(0.72, ocr.average_confidence + 0.25)), 2)
         for key, value in parsed.items()
         if value is not None and value != ""
     }
-    if parsed.get("patient_name"):
-        field_confidence["patient_name"] = 0.9
-    if parsed.get("tests_requested"):
-        field_confidence["tests_requested"] = 0.9
+    for key in ("patient_name", "patient_age", "patient_gender", "tests_requested"):
+        if parsed.get(key) not in (None, ""):
+            field_confidence[key] = 0.92
 
     return {
         "data": parsed,
