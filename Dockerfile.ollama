@@ -2,7 +2,7 @@
 FROM ollama/ollama:latest
 
 ENV OLLAMA_HOST=0.0.0.0:11434 \
-    OLLAMA_MODEL=gemma4:e4b
+    OLLAMA_MODEL=qwen3-vl:8b
 
 COPY scripts/ollama-entrypoint.sh /ollama-entrypoint.sh
 RUN sed -i 's/\r$//' /ollama-entrypoint.sh && chmod +x /ollama-entrypoint.sh
