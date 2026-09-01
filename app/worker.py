@@ -51,14 +51,26 @@ def process_job(job_id: str) -> None:
         }
 
     mark_job_processing(job_id, document_id)
+    base_hint = (project.get("extractionHint") or "").strip()
+    user_context = (job.get("userContext") or "").strip()
+    if user_context:
+        project = {
+            **project,
+            "extractionHint": (
+                f"{base_hint}\n\nAdditional user context for this re-run:\n{user_context}"
+                if base_hint
+                else f"Additional user context for this re-run:\n{user_context}"
+            ),
+        }
     hint = (project.get("extractionHint") or "").strip()
     logger.info(
-        "Processing job %s document=%s project=%s mode=%s hint_chars=%d",
+        "Processing job %s document=%s project=%s mode=%s hint_chars=%d user_context=%s",
         job_id,
         document_id,
         project_id or "_common",
         settings.extraction_mode,
         len(hint),
+        bool(user_context),
     )
     if hint:
         logger.info("Extraction context for %s: %s", project_id, hint[:240])
