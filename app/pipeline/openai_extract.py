@@ -45,19 +45,45 @@ _TRF_HINT_MARKERS = (
     "specimen",
 )
 
-_OPEN_SCHEMA = """Return a single JSON object with as much useful content as you can extract:
-- "document_type": short type label (e.g. pitch_deck, invoice, contract, prescription, report, form, other)
-- "suggested_title": concise human title for the document
-- "summary": 4-8 sentence plain-English overview of the whole document
-- "key_entities": object of notable names, companies, people, dates, metrics, amounts
-- "fields": flat object of important scalar key/value pairs found in the document
-- "sections": array of { "heading": string, "content": string } covering major sections
-- "tables": array of { "name": string|null, "headers": string[], "rows": string[][] }
-- "pages": array of { "page": number, "title": string|null, "bullets": string[], "key_points": string[] } when the source is multi-page / a deck
-- "pointers": array of short actionable or notable highlights
-- "auto_tags": array of short topic tags
+_OPEN_SCHEMA = """Return a single JSON object with as much useful content as you can extract.
+Use PLAIN strings/numbers/booleans/arrays/objects — NEVER wrap fields as {"value": "...", "low_confidence": true}.
+If unsure, still return the best readable string and list the field path in "low_confidence_fields".
 
-Rules: extract EVERYTHING readable; never invent; use null for missing; keep nested arrays/objects; expand abbreviations when clear; JSON only."""
+Include when present:
+- "document_type": short type (pitch_deck, prescription, invoice, contract, report, form, other)
+- "suggested_title": SHORT title only (3–10 words). Never a full sentence or summary paragraph.
+- "summary": 4–8 sentence plain-English overview
+- "key_entities": object of brands, people, companies, dates, metrics — spell brand names EXACTLY as printed (DoqSeal ≠ dogeseal)
+- "fields": flat scalar key/value pairs
+- "sections": [{ "heading": string, "content": string }]
+- "tables": [{ "name": string|null, "headers": string[], "rows": string[][] }]
+- "pages": [{ "page": number, "title": string|null, "bullets": string[], "key_points": string[] }] for decks
+- "pointers": string[] of highlights
+- "auto_tags": string[]
+- "low_confidence_fields": string[] of dotted paths that were hard to read
+
+For medical prescriptions ALSO include plain (non-wrapped) objects/arrays:
+- "letterhead": { doctor_name, qualification, registration_number, clinic_name, address, phone }
+- "patient": { name, age, sex, weight, date }
+- "vitals": { bp, pr, rr, temperature, spo2 }
+- "clinical_notes": { chief_complaints, history, known_case_of, diagnosis }  // strings only
+- "medicines": [{ name, form, strength, frequency, frequency_as_written, duration, instructions }]
+- "investigations": [{ name, name_expanded, urgency, instructions }]
+- "follow_up": { date, instructions }
+- "signoff": { doctor_signature_present, clinic_stamp_present }
+
+Rules: extract EVERYTHING readable; never invent; use null when blank; expand abbreviations; JSON only.
+Spell product and company names carefully letter-by-letter from the source."""
+
+
+_KNOWN_SPELLINGS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bdoge\s*seal\b", re.I), "DoqSeal"),
+    (re.compile(r"\bdogeseal\b", re.I), "DoqSeal"),
+    (re.compile(r"\bdoc\s*seal\b", re.I), "DoqSeal"),
+    (re.compile(r"\bdoq\s+seal\b", re.I), "DoqSeal"),
+    (re.compile(r"\bzeroknow\b", re.I), "Zeroknow"),
+    (re.compile(r"\bzero\s*know\b", re.I), "Zeroknow"),
+]
 
 
 def azure_openai_configured() -> bool:
@@ -234,6 +260,10 @@ def _build_vision_prompt(project: dict[str, Any]) -> str:
             "Extract structured data from this document image.\n"
             "Follow the EXTRACTION CONTEXT below exactly for sections, field names, "
             "lists, null handling, abbreviation expansion, and any required summary.\n"
+            "Use PLAIN string/number values — NEVER {\"value\":...,\"low_confidence\":...} wrappers.\n"
+            "Spell brand and product names letter-by-letter exactly as printed "
+            "(e.g. DoqSeal, not dogeseal).\n"
+            "suggested_title must be a SHORT label (3–10 words), not a paragraph.\n"
             f"{guidance}"
             f"EXTRACTION CONTEXT:\n{hint}\n\n"
             "Rules: never invent values; use null when blank/illegible; "
@@ -280,6 +310,10 @@ def _build_text_prompt(project: dict[str, Any], *, source_label: str) -> str:
             f"Extract structured data from {source_label} text.\n"
             "Follow the EXTRACTION CONTEXT below exactly for sections, field names, "
             "lists, null handling, and any required summary.\n"
+            "Use PLAIN string/number values — NEVER {\"value\":...,\"low_confidence\":...} wrappers.\n"
+            "Spell brand and product names letter-by-letter exactly as printed "
+            "(e.g. DoqSeal, not dogeseal).\n"
+            "suggested_title must be a SHORT label (3–10 words), not a paragraph.\n"
             f"{guidance}"
             f"EXTRACTION CONTEXT:\n{hint}\n\n"
             "Rules: never invent values; use null when blank/illegible; "
@@ -320,34 +354,150 @@ def _build_text_prompt(project: dict[str, Any], *, source_label: str) -> str:
     )
 
 
+def _unwrap_confidence_node(value: Any) -> tuple[Any, float | None]:
+    """Flatten {value, low_confidence} wrappers; return (plain, confidence?)."""
+    if isinstance(value, dict):
+        keys = set(value.keys())
+        if "value" in value and keys <= {
+            "value",
+            "low_confidence",
+            "confidence",
+            "confidence_score",
+        }:
+            conf: float | None = None
+            if isinstance(value.get("low_confidence"), bool):
+                conf = 0.55 if value["low_confidence"] else 0.93
+            elif isinstance(value.get("confidence"), (int, float)):
+                conf = float(value["confidence"])
+            elif isinstance(value.get("confidence_score"), (int, float)):
+                conf = float(value["confidence_score"])
+            return value.get("value"), conf
+    return value, None
+
+
+def _deep_unwrap(value: Any, path: str, conf_map: dict[str, float]) -> Any:
+    plain, conf = _unwrap_confidence_node(value)
+    if conf is not None:
+        conf_map[path] = conf
+    if isinstance(plain, list):
+        return [
+            _deep_unwrap(item, f"{path}[{i}]", conf_map)
+            for i, item in enumerate(plain)
+        ]
+    if isinstance(plain, dict):
+        out: dict[str, Any] = {}
+        for key, child in plain.items():
+            child_path = f"{path}.{key}" if path else key
+            out[key] = _deep_unwrap(child, child_path, conf_map)
+        return out
+    if isinstance(plain, str):
+        return _correct_spellings(plain)
+    return plain
+
+
+def _correct_spellings(text: str) -> str:
+    out = text
+    for pattern, replacement in _KNOWN_SPELLINGS:
+        out = pattern.sub(replacement, out)
+    return out
+
+
 def _normalize_value(value: Any) -> Any:
     if isinstance(value, list):
         if not value:
             return None
         if all(isinstance(item, (dict, list)) for item in value):
             return value
-        # Keep string lists (bullets / tags) as lists when >1 item
-        if all(isinstance(item, (str, int, float, bool)) for item in value):
-            if len(value) == 1:
-                return value[0]
-            return [str(x).strip() for x in value if str(x).strip()]
+        if all(isinstance(item, (str, int, float, bool)) or item is None for item in value):
+            cleaned = [
+                _correct_spellings(str(x).strip()) if isinstance(x, str) else x
+                for x in value
+                if x is not None and x != ""
+            ]
+            if not cleaned:
+                return None
+            if len(cleaned) == 1 and not isinstance(value[0], str):
+                return cleaned[0]
+            return cleaned
         return ", ".join(str(x).strip() for x in value if str(x).strip())
+    if isinstance(value, str):
+        return _correct_spellings(value)
     return value
 
 
+def _short_title(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    # Reject paragraph-like "titles"
+    if len(text) > 90 or text.count(" ") > 14 or text.lower().startswith("this "):
+        # Keep first clause if short enough
+        first = text.split(".")[0].strip()
+        if 3 <= len(first) <= 70 and first.count(" ") <= 10:
+            return first
+        return None
+    return text
+
+
 def _finalize_payload(parsed: dict[str, Any], *, strategy: str) -> dict[str, Any]:
-    if "tests_requested" in parsed:
-        parsed["tests_requested"] = _expand_tests(parsed.get("tests_requested"))
+    conf_map: dict[str, float] = {}
+    unwrapped = _deep_unwrap(parsed, "", conf_map)
+    if not isinstance(unwrapped, dict):
+        unwrapped = {}
+
+    if "tests_requested" in unwrapped:
+        unwrapped["tests_requested"] = _expand_tests(unwrapped.get("tests_requested"))
 
     # Promote nested "fields" object into top-level scalars when useful
-    nested_fields = parsed.get("fields")
+    nested_fields = unwrapped.get("fields")
     if isinstance(nested_fields, dict):
         for key, value in nested_fields.items():
-            if key not in parsed and value not in (None, ""):
-                parsed[key] = value
+            if key not in unwrapped and value not in (None, ""):
+                unwrapped[key] = value
+
+    # Normalize investigations: list of strings or objects with name
+    investigations = unwrapped.get("investigations")
+    if isinstance(investigations, list):
+        normalized_inv: list[Any] = []
+        for item in investigations:
+            if isinstance(item, str) and item.strip():
+                normalized_inv.append({"name": _correct_spellings(item.strip())})
+            elif isinstance(item, dict):
+                name = item.get("name") or item.get("test_name") or item.get("label")
+                if isinstance(name, dict):
+                    name, _ = _unwrap_confidence_node(name)
+                if name:
+                    item = {**item, "name": _correct_spellings(str(name))}
+                normalized_inv.append(item)
+            else:
+                normalized_inv.append(item)
+        unwrapped["investigations"] = normalized_inv
+
+    # Prefer short titles
+    short = _short_title(unwrapped.get("suggested_title"))
+    if short:
+        unwrapped["suggested_title"] = short
+    else:
+        unwrapped.pop("suggested_title", None)
+        # Build from patient / document type when possible
+        patient = unwrapped.get("patient")
+        if isinstance(patient, dict) and isinstance(patient.get("name"), str):
+            unwrapped["suggested_title"] = f"{patient['name']} — Prescription"
+        elif unwrapped.get("document_type"):
+            unwrapped["suggested_title"] = str(unwrapped["document_type"]).replace(
+                "_", " "
+            ).title()
+
+    low_paths = unwrapped.pop("low_confidence_fields", None)
+    if isinstance(low_paths, list):
+        for path in low_paths:
+            if isinstance(path, str) and path.strip():
+                conf_map[path.strip()] = min(conf_map.get(path.strip(), 0.55), 0.55)
 
     cleaned: dict[str, Any] = {}
-    for key, value in parsed.items():
+    for key, value in unwrapped.items():
         if value is None or value == "":
             continue
         normalized = _normalize_value(value)
@@ -357,10 +507,14 @@ def _finalize_payload(parsed: dict[str, Any], *, strategy: str) -> dict[str, Any
 
     field_confidence: dict[str, float] = {}
     for key, value in cleaned.items():
-        if isinstance(value, (dict, list)):
+        if key in conf_map:
+            field_confidence[key] = conf_map[key]
+        elif isinstance(value, (dict, list)):
             field_confidence[key] = 0.88
         else:
             field_confidence[key] = 0.92
+    for path, score in conf_map.items():
+        field_confidence.setdefault(path, score)
 
     return {
         "data": cleaned,

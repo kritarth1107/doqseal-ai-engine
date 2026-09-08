@@ -14,6 +14,15 @@ def _clean_title(value: str, max_len: int = 80) -> str:
     return text
 
 
+def _is_paragraph_title(text: str) -> bool:
+    t = text.strip()
+    return (
+        len(t) > 90
+        or t.count(" ") > 14
+        or t.lower().startswith(("this ", "the document", "the prescription"))
+    )
+
+
 def suggest_display_title(
     data: dict[str, Any] | None,
     *,
@@ -26,7 +35,15 @@ def suggest_display_title(
     for key in ("suggested_title", "title", "display_title"):
         raw = payload.get(key)
         if isinstance(raw, str) and len(raw.strip()) >= 3:
+            if _is_paragraph_title(raw):
+                continue
             return _clean_title(raw)
+
+    patient = payload.get("patient")
+    if isinstance(patient, dict):
+        name = patient.get("name")
+        if isinstance(name, str) and name.strip():
+            return _clean_title(f"{name.strip()} — Prescription")
 
     entities = payload.get("key_entities")
     if isinstance(entities, dict):
@@ -34,6 +51,8 @@ def suggest_display_title(
             "Company name",
             "company_name",
             "Name of the company",
+            "brand",
+            "Brand",
             "Patient name",
             "patient_name",
             "Title",
@@ -41,35 +60,14 @@ def suggest_display_title(
         ):
             value = entities.get(label)
             if isinstance(value, str) and len(value.strip()) >= 3:
-                about = payload.get("summary") or payload.get("document_type")
-                if isinstance(about, str) and about.strip():
-                    short = about.strip().split(".")[0][:40]
-                    return _clean_title(f"{value.strip()} — {short}")
                 return _clean_title(value)
 
-    pointers = payload.get("pointers")
-    if isinstance(pointers, list):
-        for item in pointers[:8]:
-            if not isinstance(item, dict):
-                continue
-            label = str(item.get("label") or "").lower()
-            value = item.get("value")
-            if not isinstance(value, str) or len(value.strip()) < 3:
-                continue
-            if any(
-                token in label
-                for token in ("company", "patient", "title", "name of", "subject")
-            ):
-                return _clean_title(value)
+    doc_type = payload.get("document_type")
+    if isinstance(doc_type, str) and doc_type.strip():
+        return _clean_title(doc_type.replace("_", " ").title())
 
-    summary = payload.get("summary")
-    if isinstance(summary, str) and len(summary.strip()) >= 12:
-        first = summary.strip().split(".")[0]
-        if len(first) >= 8:
-            return _clean_title(first)
-
-    # Light content sniff (no fixed document-type catalog)
-    hay = f"{original_filename}\n{ocr_text[:2500]}"
+    # Light OCR fallback — never use long summaries
+    hay = f"{original_filename}\n{(ocr_text or '')[:2500]}"
     company = re.search(
         r"(?:name of the company|company name)\s*[:\-]?\s*([A-Za-z0-9 &.\-]{3,80})",
         hay,
@@ -78,20 +76,13 @@ def suggest_display_title(
     if company:
         return _clean_title(company.group(1))
 
-    patient = re.search(
-        r"(?:patient(?:'s)?\s*name|name of patient)\s*[:\-]?\s*([A-Za-z .]{3,60})",
-        hay,
-        re.I,
-    )
-    if patient:
-        return _clean_title(patient.group(1))
-
-    # First meaningful OCR line as last resort
     for line in (ocr_text or "").splitlines():
         cleaned = re.sub(r"\s+", " ", line).strip()
         if len(cleaned) < 8 or len(cleaned) > 90:
             continue
         if re.search(r"^\d+$|page\s+\d+|form\s+no", cleaned, re.I):
+            continue
+        if _is_paragraph_title(cleaned):
             continue
         return _clean_title(cleaned)
 
