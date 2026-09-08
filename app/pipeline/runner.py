@@ -216,28 +216,19 @@ def run_extraction_pipeline(
         "_documentFilename": filename,
     }
 
-    # 1) Word / Excel / CSV / text — prefer local parse; LLM only when sparse / forced
+    # 1) Word / Excel / CSV / text — always structure with text model when available
     if is_office and mode != "ocr_only":
         office_text = extract_office_text(file_bytes, mime_type, filename)
         ocr = ocr_result_from_text(office_text, confidence=0.95)
-        extraction = extract_from_ocr(project, ocr)
-        extraction["strategy"] = "office_text"
-        force_ai = bool(project.get("_forceAi")) or bool(
-            (project.get("_userContext") or "").strip()
-        )
-        filled = sum(
-            1
-            for v in (extraction.get("data") or {}).values()
-            if v not in (None, "", [], {})
-        )
-        need_llm = force_ai or filled < max(1, len(project.get("fields") or []) // 2)
-        if need_llm and azure_openai_configured():
+        if azure_openai_configured() and (office_text or "").strip():
             extraction = extract_text_with_azure_openai(
                 project, office_text, source_label=filename or "office document"
             )
             logger.info("Office/text Azure OpenAI extraction succeeded")
         else:
-            logger.info("Office/text local extraction (skipped LLM, filled=%d)", filled)
+            extraction = extract_from_ocr(project, ocr)
+            extraction["strategy"] = "office_text"
+            logger.info("Office/text local extraction (no Azure)")
 
     # 2) Born-digital PDF text layer
     elif is_pdf and settings.prefer_pdf_text and not bool(project.get("_forceAi")):

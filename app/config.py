@@ -47,22 +47,23 @@ class Settings:
     vision_max_side_high: int = int(os.getenv("VISION_MAX_SIDE_HIGH", "1280"))
     vision_jpeg_quality: int = int(os.getenv("VISION_JPEG_QUALITY", "70"))
     vision_max_completion_tokens: int = int(
-        os.getenv("VISION_MAX_COMPLETION_TOKENS", "2500")
+        os.getenv("VISION_MAX_COMPLETION_TOKENS", "3000")
     )
-    text_max_chars: int = int(os.getenv("TEXT_MAX_CHARS", "8000"))
+    text_max_chars: int = int(os.getenv("TEXT_MAX_CHARS", "120000"))
     text_max_completion_tokens: int = int(
-        os.getenv("TEXT_MAX_COMPLETION_TOKENS", "2000")
+        os.getenv("TEXT_MAX_COMPLETION_TOKENS", "4000")
     )
     chat_max_completion_tokens: int = int(
         os.getenv("CHAT_MAX_COMPLETION_TOKENS", "250")
     )
-    max_pdf_pages: int = int(os.getenv("MAX_PDF_PAGES", "2"))
+    max_pdf_pages: int = int(os.getenv("MAX_PDF_PAGES", "40"))
+    max_vision_pages: int = int(os.getenv("MAX_VISION_PAGES", "4"))
     ocr_languages: str = os.getenv("OCR_LANGUAGES", "en,hi")
     confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.75"))
     # Speed knobs — prefer PDF text path to avoid vision entirely
     pdf_render_scale: float = float(os.getenv("PDF_RENDER_SCALE", "1.25"))
     prefer_pdf_text: bool = os.getenv("PREFER_PDF_TEXT", "true").lower() == "true"
-    pdf_text_min_chars: int = int(os.getenv("PDF_TEXT_MIN_CHARS", "120"))
+    pdf_text_min_chars: int = int(os.getenv("PDF_TEXT_MIN_CHARS", "80"))
     skip_vlm_min_ocr_confidence: float = float(
         os.getenv("SKIP_VLM_MIN_OCR_CONFIDENCE", "0.72")
     )

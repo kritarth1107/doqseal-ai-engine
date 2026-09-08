@@ -82,10 +82,11 @@ jobs:
               "SKIP_OCR_FOR_VISION=true" \
               "VISION_DETAIL=low" \
               "VISION_MAX_SIDE=1024" \
-              "VISION_MAX_COMPLETION_TOKENS=2500" \
-              "TEXT_MAX_CHARS=8000" \
-              "TEXT_MAX_COMPLETION_TOKENS=2000" \
-              "MAX_PDF_PAGES=2" \
+              "VISION_MAX_COMPLETION_TOKENS=3000" \
+              "TEXT_MAX_CHARS=120000" \
+              "TEXT_MAX_COMPLETION_TOKENS=4000" \
+              "MAX_PDF_PAGES=40" \
+              "MAX_VISION_PAGES=4" \
               "EXTRACTION_MODE=hybrid" \
               "WARMUP_VLM=false" \
               "WARMUP_MODELS=false"
