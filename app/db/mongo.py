@@ -55,6 +55,15 @@ def mark_job_completed(
     now = utcnow()
     db = get_db()
 
+    latest = db.extractions.find_one(
+        {"documentId": document_id},
+        sort=[("version", -1), ("createdAt", -1)],
+    )
+    next_version = int((latest or {}).get("version") or 0) + 1
+
+    # Drop older rows so detail views always resolve the latest extraction
+    db.extractions.delete_many({"documentId": document_id})
+
     db.extractions.insert_one(
         {
             "extractionId": str(uuid4()),
@@ -62,7 +71,7 @@ def mark_job_completed(
             "jobId": job_id,
             "organisationId": organisation_id,
             "projectId": project_id,
-            "version": 1,
+            "version": next_version,
             "data": extraction_payload["data"],
             "fieldConfidence": extraction_payload["fieldConfidence"],
             "validationErrors": extraction_payload["validationErrors"],

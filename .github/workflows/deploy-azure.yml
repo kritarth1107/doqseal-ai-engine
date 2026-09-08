@@ -1,5 +1,5 @@
 # Deploys AI engine to Azure Container Apps via OIDC (AZURE_* repo secrets).
-# CPU image (Dockerfile) — vision extraction uses Azure OpenAI GPT-4o.
+# CPU image (Dockerfile) — vision extraction uses Azure OpenAI GPT-5.4.
 # RAG indexing stays on Qdrant + local embeddings.
 name: Deploy to Azure Container Apps
 
@@ -57,6 +57,7 @@ jobs:
               azure-openai-endpoint=keyvaultref:https://${KEY_VAULT_NAME}.vault.azure.net/secrets/AZURE-OPENAI-ENDPOINT,identityref:system \
               azure-openai-api-key=keyvaultref:https://${KEY_VAULT_NAME}.vault.azure.net/secrets/AZURE-OPENAI-API-KEY,identityref:system \
               azure-openai-deployment=keyvaultref:https://${KEY_VAULT_NAME}.vault.azure.net/secrets/AZURE-OPENAI-DEPLOYMENT,identityref:system \
+              azure-openai-text-deployment=keyvaultref:https://${KEY_VAULT_NAME}.vault.azure.net/secrets/AZURE-OPENAI-TEXT-DEPLOYMENT,identityref:system \
               azure-openai-api-version=keyvaultref:https://${KEY_VAULT_NAME}.vault.azure.net/secrets/AZURE-OPENAI-API-VERSION,identityref:system
 
       - name: Deploy Container App (CPU Consumption)
@@ -76,8 +77,15 @@ jobs:
               "AZURE_OPENAI_ENDPOINT=secretref:azure-openai-endpoint" \
               "AZURE_OPENAI_API_KEY=secretref:azure-openai-api-key" \
               "AZURE_OPENAI_DEPLOYMENT=secretref:azure-openai-deployment" \
+              "AZURE_OPENAI_TEXT_DEPLOYMENT=secretref:azure-openai-text-deployment" \
               "AZURE_OPENAI_API_VERSION=secretref:azure-openai-api-version" \
               "SKIP_OCR_FOR_VISION=true" \
+              "VISION_DETAIL=low" \
+              "VISION_MAX_SIDE=1024" \
+              "VISION_MAX_COMPLETION_TOKENS=2500" \
+              "TEXT_MAX_CHARS=8000" \
+              "TEXT_MAX_COMPLETION_TOKENS=2000" \
+              "MAX_PDF_PAGES=2" \
               "EXTRACTION_MODE=hybrid" \
               "WARMUP_VLM=false" \
-              "WARMUP_MODELS=true"
+              "WARMUP_MODELS=false"

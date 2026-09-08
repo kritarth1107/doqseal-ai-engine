@@ -1,4 +1,4 @@
-"""Fast vision extraction via Azure OpenAI GPT-4o (target <10s)."""
+"""Token-efficient Azure OpenAI extraction (vision + text)."""
 
 from __future__ import annotations
 
@@ -26,12 +26,27 @@ def azure_openai_configured() -> bool:
     )
 
 
-def _pil_to_b64_jpeg(image: Image.Image, *, max_side: int = 1600, quality: int = 85) -> str:
+def _clip(text: str, limit: int) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _pil_to_b64_jpeg(
+    image: Image.Image,
+    *,
+    max_side: int,
+    quality: int,
+) -> str:
     img = ImageOps.exif_transpose(image.convert("RGB"))
     w, h = img.size
     scale = min(1.0, max_side / max(w, h))
     if scale < 1.0:
-        img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.Resampling.LANCZOS)
+        img = img.resize(
+            (max(1, int(w * scale)), max(1, int(h * scale))),
+            Image.Resampling.LANCZOS,
+        )
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=quality, optimize=True)
     return base64.b64encode(buf.getvalue()).decode("ascii")
@@ -41,7 +56,6 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
     text = (raw or "").strip()
     if not text:
         return {}
-    # Strip markdown fences if present
     fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.I)
     if fence:
         text = fence.group(1).strip()
@@ -85,7 +99,6 @@ def _expand_tests(value: Any) -> Any:
         replaced = False
         for pattern, full in mapping.items():
             if re.search(pattern, part, re.I):
-                # If already contains full form, keep as-is
                 if full.split(" (")[0].lower() in part.lower() and "(" in part:
                     out = part
                 else:
@@ -93,7 +106,6 @@ def _expand_tests(value: Any) -> Any:
                 replaced = True
                 break
         expanded.append(out if replaced else part)
-    # Dedupe preserving order
     seen: set[str] = set()
     uniq: list[str] = []
     for item in expanded:
@@ -105,62 +117,159 @@ def _expand_tests(value: Any) -> Any:
     return ", ".join(uniq)
 
 
-def _build_prompt(project: dict[str, Any]) -> str:
-    fields = project.get("fields") or []
-    hint = (project.get("extractionHint") or "").strip()
-    name = (project.get("name") or "").strip()
+# Long project extraction contexts (Rx schemas, checklists, etc.)
+HINT_MAX_CHARS = 8000
+USER_CONTEXT_MAX_CHARS = 2000
 
+_RICH_HINT_MARKERS = (
+    "medicines",
+    "investigations",
+    "clinical_notes",
+    "letterhead",
+    "follow_up",
+    "json object",
+    "structured json",
+    "dosage",
+    "prescription",
+    "return the result",
+)
+
+
+def _field_lines(project: dict[str, Any], *, defaults: list[str]) -> str:
+    fields = project.get("fields") or []
     if fields:
-        field_lines = "\n".join(
-            f'- "{f["key"]}" ({f.get("type", "string")}): {f.get("label", f["key"])}'
+        return "\n".join(
+            f'- "{f["key"]}"'
             for f in fields
             if f.get("key")
         )
-    else:
-        field_lines = """
-- "patient_name" (string|null)
-- "patient_age" (number|null)
-- "patient_gender" (string|null): Male / Female / Transgender from checked box
-- "client_code" (string|null)
-- "tests_requested" (string|null): comma-separated; expand abbreviations to full forms
-- "lab_name" (string|null)
-""".strip()
+    return "\n".join(f'- "{key}"' for key in defaults)
 
-    return f"""You are extracting structured data from a medical Test Requisition Form photo (often handwritten).
 
-Project: {name or "TRF"}
-Instructions: {hint or "Extract patient and test fields accurately."}
+def _raw_hint(project: dict[str, Any]) -> str:
+    return str(project.get("extractionHint") or "").strip()
 
-Return ONE minified JSON object with exactly these keys when present:
-{field_lines}
-- "suggested_title" (string): "{{Patient Name}} — {{tests}}"
-- "summary" (string): one short sentence from filled values only
 
-Rules:
-- Read ONLY handwritten ink and clearly checked boxes.
-- Prefer null over guessing.
-- Expand clear test abbreviations (CBC→Complete Blood Count (CBC), TSH→Thyroid Stimulating Hormone (TSH), TFT→Thyroid Function Test (TFT), HBsAg→Hepatitis B Surface Antigen (HBsAg), HbA1c→Glycated Hemoglobin (HbA1c), CRP→C-Reactive Protein (CRP), ESR→Erythrocyte Sedimentation Rate (ESR), Creat→Creatinine, Lipid pr→Lipid Profile, B group→Blood Group).
-- Ignore Specimen Type checkboxes (Serum, EDTA, Urine) — those are not tests.
-- Ignore printed purple labels / OCR noise.
-- JSON only, no markdown.
-"""
+def _is_rich_hint(hint: str, project: dict[str, Any]) -> bool:
+    """True when the project supplies structured extraction instructions."""
+    if project.get("fields"):
+        return False
+    if len(hint) >= 400:
+        return True
+    lower = hint.lower()
+    return any(marker in lower for marker in _RICH_HINT_MARKERS)
+
+
+def _guidance(project: dict[str, Any]) -> str:
+    user_context = _clip(
+        str(project.get("_userContext") or "").strip(), USER_CONTEXT_MAX_CHARS
+    )
+    if not user_context:
+        return ""
+    return f"USER FIX (priority): {user_context}\n"
+
+
+def _build_vision_prompt(project: dict[str, Any]) -> str:
+    hint = _clip(_raw_hint(project), HINT_MAX_CHARS)
+    guidance = _guidance(project)
+
+    # Structured project context → follow the user's schema, not TRF defaults
+    if _is_rich_hint(hint, project):
+        return (
+            "Extract structured data from this document image.\n"
+            "Follow the EXTRACTION CONTEXT below exactly for sections, field names, "
+            "lists (e.g. medicines, investigations), null handling, abbreviation expansion, "
+            "and any required summary.\n"
+            f"{guidance}"
+            f"EXTRACTION CONTEXT:\n{hint}\n\n"
+            "Rules: never invent values; use null when blank/illegible; "
+            "preserve nested objects and arrays; return a single JSON object only."
+        )
+
+    defaults = [
+        "patient_name",
+        "patient_age",
+        "patient_gender",
+        "client_code",
+        "tests_requested",
+        "lab_name",
+    ]
+    return (
+        "Extract TRF fields from this form image into minified JSON.\n"
+        f"Keys:\n{_field_lines(project, defaults=defaults)}\n"
+        f"{guidance}"
+        f"Hint: {hint or 'handwritten medical TRF'}\n"
+        "Rules: null if unsure; checked gender boxes; tests as comma string; "
+        "ignore specimen type/labels; JSON only."
+    )
+
+
+def _build_text_prompt(project: dict[str, Any], *, source_label: str) -> str:
+    hint = _clip(_raw_hint(project), HINT_MAX_CHARS)
+    guidance = _guidance(project)
+
+    if _is_rich_hint(hint, project):
+        return (
+            f"Extract structured data from {source_label} text.\n"
+            "Follow the EXTRACTION CONTEXT below exactly for sections, field names, "
+            "lists, null handling, and any required summary.\n"
+            f"{guidance}"
+            f"EXTRACTION CONTEXT:\n{hint}\n\n"
+            "Rules: never invent values; use null when blank/illegible; "
+            "preserve nested objects and arrays; return a single JSON object only."
+        )
+
+    defaults = [
+        "document_type",
+        "patient_name",
+        "patient_age",
+        "patient_gender",
+        "client_code",
+        "tests_requested",
+    ]
+    return (
+        f"Extract fields from {source_label} text into minified JSON.\n"
+        f"Keys:\n{_field_lines(project, defaults=defaults)}\n"
+        f"{guidance}"
+        f"Hint: {hint or 'business/medical document'}\n"
+        "Rules: null if unsure; JSON only."
+    )
+
+
+def _normalize_value(value: Any) -> Any:
+    """Keep nested lists/objects; only join flat primitive lists."""
+    if isinstance(value, list):
+        if not value:
+            return None
+        if all(isinstance(item, (dict, list)) for item in value):
+            return value
+        return ", ".join(str(x).strip() for x in value if str(x).strip())
+    return value
 
 
 def _finalize_payload(parsed: dict[str, Any], *, strategy: str) -> dict[str, Any]:
+    # Keep model-produced summary when present; drop only unused marketing extras
+    for drop in ("suggested_title", "key_entities"):
+        parsed.pop(drop, None)
+
     if "tests_requested" in parsed:
         parsed["tests_requested"] = _expand_tests(parsed.get("tests_requested"))
 
-    cleaned = {
-        k: (", ".join(str(x) for x in v) if isinstance(v, list) else v)
-        for k, v in parsed.items()
-        if v is not None and v != ""
-    }
+    cleaned: dict[str, Any] = {}
+    for key, value in parsed.items():
+        if value is None or value == "":
+            continue
+        normalized = _normalize_value(value)
+        if normalized is None or normalized == "":
+            continue
+        cleaned[key] = normalized
 
-    field_confidence = {
-        key: 0.93
-        for key, value in cleaned.items()
-        if value is not None and value != ""
-    }
+    field_confidence: dict[str, float] = {}
+    for key, value in cleaned.items():
+        if isinstance(value, (dict, list)):
+            field_confidence[key] = 0.88
+        else:
+            field_confidence[key] = 0.93
     for key in (
         "patient_name",
         "patient_age",
@@ -178,12 +287,16 @@ def _finalize_payload(parsed: dict[str, Any], *, strategy: str) -> dict[str, Any
     }
 
 
-def _chat_completions(messages: list[dict[str, Any]], *, max_tokens: int = 1200) -> dict[str, Any]:
+def _chat_completions(
+    messages: list[dict[str, Any]],
+    *,
+    deployment: str,
+    max_tokens: int,
+) -> dict[str, Any]:
     if not azure_openai_configured():
         raise RuntimeError("Azure OpenAI is not configured")
 
     endpoint = settings.azure_openai_endpoint.rstrip("/")
-    deployment = settings.azure_openai_deployment
     api_version = settings.azure_openai_api_version
     url = (
         f"{endpoint}/openai/deployments/{deployment}/chat/completions"
@@ -191,10 +304,10 @@ def _chat_completions(messages: list[dict[str, Any]], *, max_tokens: int = 1200)
     )
     payload = {
         "messages": messages,
-        "temperature": 0,
-        "max_tokens": max_tokens,
+        "max_completion_tokens": max_tokens,
         "response_format": {"type": "json_object"},
     }
+    # Some GPT-5 models ignore/reject custom temperature; omit for reliability + cost.
     headers = {
         "api-key": settings.azure_openai_api_key,
         "Content-Type": "application/json",
@@ -204,6 +317,17 @@ def _chat_completions(messages: list[dict[str, Any]], *, max_tokens: int = 1200)
         response = client.post(url, headers=headers, json=payload)
         response.raise_for_status()
         body = response.json()
+
+    usage = body.get("usage") or {}
+    if usage:
+        logger.info(
+            "Azure OpenAI usage deployment=%s prompt=%s completion=%s total=%s",
+            deployment,
+            usage.get("prompt_tokens"),
+            usage.get("completion_tokens"),
+            usage.get("total_tokens"),
+        )
+
     content = (
         (((body.get("choices") or [{}])[0].get("message") or {}).get("content"))
         or ""
@@ -221,11 +345,37 @@ def extract_with_azure_openai(
     if not pages:
         raise ValueError("No pages available for vision extraction")
 
-    image_b64 = _pil_to_b64_jpeg(pages[0].image)
-    prompt = _build_prompt(project)
+    rich = _is_rich_hint(_raw_hint(project), project)
+    force_detail = (
+        bool(project.get("_forceAi"))
+        or bool((project.get("_userContext") or "").strip())
+        or rich
+    )
+    detail = "high" if force_detail else settings.vision_detail
+    max_side = settings.vision_max_side_high if force_detail else settings.vision_max_side
+    quality = settings.vision_jpeg_quality
+    max_tokens = (
+        max(settings.vision_max_completion_tokens, 2500)
+        if rich
+        else settings.vision_max_completion_tokens
+    )
+
+    image_b64 = _pil_to_b64_jpeg(
+        pages[0].image,
+        max_side=max_side,
+        quality=quality,
+    )
+    prompt = _build_vision_prompt(project)
+    deployment = settings.azure_openai_deployment
     logger.info(
-        "Azure OpenAI vision extract deployment=%s detail=high",
-        settings.azure_openai_deployment,
+        "Azure OpenAI vision extract deployment=%s detail=%s max_side=%s "
+        "prompt_chars=%d rich_hint=%s max_tokens=%d",
+        deployment,
+        detail,
+        max_side,
+        len(prompt),
+        rich,
+        max_tokens,
     )
     parsed = _chat_completions(
         [
@@ -237,15 +387,17 @@ def extract_with_azure_openai(
                         "type": "image_url",
                         "image_url": {
                             "url": f"data:image/jpeg;base64,{image_b64}",
-                            "detail": "high",
+                            "detail": detail,
                         },
                     },
                 ],
             }
-        ]
+        ],
+        deployment=deployment,
+        max_tokens=max_tokens,
     )
     return _finalize_payload(
-        parsed, strategy=f"azure-openai:{settings.azure_openai_deployment}"
+        parsed, strategy=f"azure-openai:{deployment}"
     )
 
 
@@ -255,56 +407,39 @@ def extract_text_with_azure_openai(
     *,
     source_label: str = "document",
 ) -> dict[str, Any]:
-    """Structure plain text from PDF/Office/CSV into project fields via GPT-4o."""
-    fields = project.get("fields") or []
-    hint = (project.get("extractionHint") or "").strip()
-    name = (project.get("name") or "").strip()
-    if fields:
-        field_lines = "\n".join(
-            f'- "{f["key"]}" ({f.get("type", "string")}): {f.get("label", f["key"])}'
-            for f in fields
-            if f.get("key")
-        )
-    else:
-        field_lines = """
-- "document_type" (string|null)
-- "summary" (string)
-- "key_entities" (object): important names, dates, ids found in the text
-- "patient_name" (string|null)
-- "patient_age" (number|null)
-- "patient_gender" (string|null)
-- "client_code" (string|null)
-- "tests_requested" (string|null)
-""".strip()
-
-    prompt = f"""Extract structured JSON from this {source_label} text.
-
-Project: {name or "Documents"}
-Instructions: {hint or "Extract the most important business fields accurately."}
-
-Return ONE JSON object with these keys when present:
-{field_lines}
-- "suggested_title" (string): short human title for the document
-- "summary" (string): 1-2 sentences
-
-Rules:
-- Prefer null over guessing.
-- Expand clear lab-test abbreviations to full forms when present.
-- JSON only.
-"""
-    clipped = (document_text or "")[:50_000]
+    """Structure plain text via cheaper text deployment when configured."""
+    rich = _is_rich_hint(_raw_hint(project), project)
+    deployment = (
+        settings.azure_openai_text_deployment
+        or settings.azure_openai_deployment
+    )
+    prompt = _build_text_prompt(project, source_label=source_label)
+    clipped = _clip(document_text or "", settings.text_max_chars)
+    max_tokens = (
+        max(settings.text_max_completion_tokens, 2000)
+        if rich
+        else settings.text_max_completion_tokens
+    )
     logger.info(
-        "Azure OpenAI text extract deployment=%s chars=%d",
-        settings.azure_openai_deployment,
+        "Azure OpenAI text extract deployment=%s chars=%d prompt_chars=%d "
+        "rich_hint=%s max_tokens=%d",
+        deployment,
         len(clipped),
+        len(prompt),
+        rich,
+        max_tokens,
     )
     parsed = _chat_completions(
         [
-            {"role": "system", "content": "You extract structured fields from documents."},
-            {"role": "user", "content": f"{prompt}\n\n--- DOCUMENT TEXT ---\n{clipped}"},
-        ]
+            {
+                "role": "user",
+                "content": f"{prompt}\n\nTEXT:\n{clipped}",
+            }
+        ],
+        deployment=deployment,
+        max_tokens=max_tokens,
     )
     return _finalize_payload(
         parsed,
-        strategy=f"azure-openai-text:{settings.azure_openai_deployment}",
+        strategy=f"azure-openai-text:{deployment}",
     )

@@ -68,18 +68,26 @@ def _vision_or_ocr(
     if not pages:
         raise ValueError("No pages could be loaded from document")
 
+    force_ai = bool(project.get("_forceAi")) or bool(
+        (project.get("_userContext") or "").strip()
+    )
     use_azure = (
         settings.vlm_provider.lower() == "azure_openai"
         and azure_openai_configured()
         and mode != "ocr_only"
     )
-    fast_vision = use_azure and (is_image or settings.skip_ocr_for_vision or "pdf" in mime_type.lower())
+    # Re-runs / handwritten images prefer vision. Digital PDFs should use text path first.
+    fast_vision = use_azure and (
+        force_ai
+        or is_image
+        or (settings.skip_ocr_for_vision and is_image)
+    )
 
     if fast_vision:
         ocr = _empty_ocr()
         try:
             extraction = extract_with_azure_openai(project, pages)
-            logger.info("Azure OpenAI GPT-4o vision extraction succeeded")
+            logger.info("Azure OpenAI GPT-5.4 vision extraction succeeded")
             return ocr, extraction
         except Exception as error:
             logger.warning("Azure OpenAI vision failed, falling back: %s", error)
@@ -87,6 +95,21 @@ def _vision_or_ocr(
             try:
                 extraction = extract_with_vlm(project, pages, ocr)
             except Exception as ollama_err:
+                # Even on fallback, if user context was provided try text LLM on OCR
+                if force_ai and azure_openai_configured() and (ocr.full_text or "").strip():
+                    try:
+                        extraction = extract_text_with_azure_openai(
+                            project,
+                            ocr.full_text or "",
+                            source_label="OCR text with user guidance",
+                        )
+                        extraction["strategy"] = (
+                            f"azure-openai-text-fallback:{settings.azure_openai_deployment}"
+                        )
+                        extraction["vlmError"] = f"{error}; {ollama_err}"
+                        return ocr, extraction
+                    except Exception:
+                        pass
                 extraction = extract_from_ocr(project, ocr)
                 extraction["strategy"] = "ocr_fallback"
                 extraction["vlmError"] = f"{error}; {ollama_err}"
@@ -94,10 +117,11 @@ def _vision_or_ocr(
 
     ocr = run_ocr(pages)
     logger.info(
-        "OCR complete: %d lines, avg confidence %.2f (image=%s)",
+        "OCR complete: %d lines, avg confidence %.2f (image=%s force_ai=%s)",
         len(ocr.lines),
         ocr.average_confidence,
         is_image,
+        force_ai,
     )
     if pdf_text and len(pdf_text) > 40:
         merged = f"{pdf_text}\n\n{ocr.full_text}".strip()
@@ -106,10 +130,13 @@ def _vision_or_ocr(
             confidence=max(ocr.average_confidence, 0.7),
         )
 
-    skip_vlm = mode == "ocr_only" or (
-        not is_image
-        and len((ocr.full_text or "").strip()) >= settings.skip_vlm_min_text_chars
-        and ocr.average_confidence >= settings.skip_vlm_min_ocr_confidence
+    skip_vlm = (not force_ai) and (
+        mode == "ocr_only"
+        or (
+            not is_image
+            and len((ocr.full_text or "").strip()) >= settings.skip_vlm_min_text_chars
+            and ocr.average_confidence >= settings.skip_vlm_min_ocr_confidence
+        )
     )
     if skip_vlm:
         extraction = extract_from_ocr(project, ocr)
@@ -123,7 +150,21 @@ def _vision_or_ocr(
         else:
             extraction = extract_with_vlm(project, pages, ocr)
     except Exception as error:
-        logger.warning("VLM failed, falling back to OCR-only: %s", error)
+        logger.warning("VLM failed, falling back: %s", error)
+        if force_ai and azure_openai_configured() and (ocr.full_text or "").strip():
+            try:
+                extraction = extract_text_with_azure_openai(
+                    project,
+                    ocr.full_text or "",
+                    source_label="OCR text with user guidance",
+                )
+                extraction["strategy"] = (
+                    f"azure-openai-text-fallback:{settings.azure_openai_deployment}"
+                )
+                extraction["vlmError"] = str(error)
+                return ocr, extraction
+            except Exception as text_err:
+                logger.warning("Azure text fallback also failed: %s", text_err)
         extraction = extract_from_ocr(project, ocr)
         extraction["strategy"] = "ocr_fallback"
         extraction["vlmError"] = str(error)
@@ -175,21 +216,31 @@ def run_extraction_pipeline(
         "_documentFilename": filename,
     }
 
-    # 1) Word / Excel / CSV / text
+    # 1) Word / Excel / CSV / text — prefer local parse; LLM only when sparse / forced
     if is_office and mode != "ocr_only":
         office_text = extract_office_text(file_bytes, mime_type, filename)
         ocr = ocr_result_from_text(office_text, confidence=0.95)
-        if azure_openai_configured():
+        extraction = extract_from_ocr(project, ocr)
+        extraction["strategy"] = "office_text"
+        force_ai = bool(project.get("_forceAi")) or bool(
+            (project.get("_userContext") or "").strip()
+        )
+        filled = sum(
+            1
+            for v in (extraction.get("data") or {}).values()
+            if v not in (None, "", [], {})
+        )
+        need_llm = force_ai or filled < max(1, len(project.get("fields") or []) // 2)
+        if need_llm and azure_openai_configured():
             extraction = extract_text_with_azure_openai(
                 project, office_text, source_label=filename or "office document"
             )
             logger.info("Office/text Azure OpenAI extraction succeeded")
         else:
-            extraction = extract_from_ocr(project, ocr)
-            extraction["strategy"] = "office_text"
+            logger.info("Office/text local extraction (skipped LLM, filled=%d)", filled)
 
     # 2) Born-digital PDF text layer
-    elif is_pdf and settings.prefer_pdf_text:
+    elif is_pdf and settings.prefer_pdf_text and not bool(project.get("_forceAi")):
         pdf_text, pdf_pages_with_text = extract_pdf_text_layers(file_bytes)
         logger.info(
             "PDF text layer: %d chars across %d pages",
@@ -199,6 +250,7 @@ def run_extraction_pipeline(
         if len(pdf_text) >= settings.pdf_text_min_chars:
             ocr = ocr_result_from_text(pdf_text, confidence=0.93)
             if azure_openai_configured() and mode != "ocr_only":
+                # Cheap text model — avoids vision tokens for digital PDFs
                 extraction = extract_text_with_azure_openai(
                     project, pdf_text, source_label=filename or "pdf"
                 )
@@ -216,7 +268,7 @@ def run_extraction_pipeline(
                 pdf_text=pdf_text,
             )
 
-    # 3) Images / scans / remaining PDFs
+    # 3) Images / scans / remaining PDFs / forced AI re-runs
     else:
         if not (is_pdf or is_image):
             raise ValueError(

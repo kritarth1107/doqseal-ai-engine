@@ -53,26 +53,39 @@ def process_job(job_id: str) -> None:
     mark_job_processing(job_id, document_id)
     base_hint = (project.get("extractionHint") or "").strip()
     user_context = (job.get("userContext") or "").strip()
+    force_ai = bool(job.get("forceAi")) or bool(user_context)
     if user_context:
         project = {
             **project,
             "extractionHint": (
-                f"{base_hint}\n\nAdditional user context for this re-run:\n{user_context}"
+                f"{base_hint}\n\nIMPORTANT user guidance for this extraction re-run "
+                f"(follow carefully; override conflicting OCR guesses):\n{user_context}"
                 if base_hint
-                else f"Additional user context for this re-run:\n{user_context}"
+                else (
+                    "IMPORTANT user guidance for this extraction re-run "
+                    f"(follow carefully; override conflicting OCR guesses):\n{user_context}"
+                )
             ),
+            "_userContext": user_context,
+            "_forceAi": True,
         }
+    elif force_ai:
+        project = {**project, "_forceAi": True}
+
     hint = (project.get("extractionHint") or "").strip()
     logger.info(
-        "Processing job %s document=%s project=%s mode=%s hint_chars=%d user_context=%s",
+        "Processing job %s document=%s project=%s mode=%s hint_chars=%d user_context=%s force_ai=%s",
         job_id,
         document_id,
         project_id or "_common",
         settings.extraction_mode,
         len(hint),
         bool(user_context),
+        force_ai,
     )
-    if hint:
+    if user_context:
+        logger.info("User context for %s: %s", job_id, user_context[:400])
+    elif hint:
         logger.info("Extraction context for %s: %s", project_id, hint[:240])
 
     if project_id:

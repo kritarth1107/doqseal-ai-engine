@@ -23,31 +23,50 @@ class Settings:
 
     # Extraction pipeline
     extraction_mode: str = os.getenv("EXTRACTION_MODE", "hybrid")  # hybrid | ocr_only | stub
-    # Vision via Azure OpenAI GPT-4o (default) or Ollama multimodal fallback.
+    # Vision via Azure OpenAI GPT-5.4 (default) or Ollama multimodal fallback.
     vlm_provider: str = os.getenv("VLM_PROVIDER", "azure_openai")  # azure_openai | ollama
     vlm_model: str = os.getenv("VLM_MODEL", "qwen3-vl:8b")
     vlm_use_4bit: bool = os.getenv("VLM_USE_4BIT", "true").lower() == "true"
     azure_openai_endpoint: str = os.getenv("AZURE_OPENAI_ENDPOINT", "")
     azure_openai_api_key: str = os.getenv("AZURE_OPENAI_API_KEY", "")
-    azure_openai_deployment: str = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+    # Vision / handwriting (expensive). Text structuring uses the cheaper deployment.
+    azure_openai_deployment: str = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5.4")
+    azure_openai_text_deployment: str = os.getenv(
+        "AZURE_OPENAI_TEXT_DEPLOYMENT", "gpt-4.1-mini"
+    )
     azure_openai_api_version: str = os.getenv(
         "AZURE_OPENAI_API_VERSION", "2024-08-01-preview"
     )
-    # When true, handwritten/image TRFs skip EasyOCR and go straight to GPT-4o.
+    # When true, handwritten/image TRFs skip EasyOCR and go straight to vision.
     skip_ocr_for_vision: bool = (
         os.getenv("SKIP_OCR_FOR_VISION", "true").lower() == "true"
     )
-    max_pdf_pages: int = int(os.getenv("MAX_PDF_PAGES", "3"))
+    # Token / cost knobs (vision images dominate spend)
+    vision_detail: str = os.getenv("VISION_DETAIL", "low")  # low default; high on reprocess
+    vision_max_side: int = int(os.getenv("VISION_MAX_SIDE", "1024"))
+    vision_max_side_high: int = int(os.getenv("VISION_MAX_SIDE_HIGH", "1280"))
+    vision_jpeg_quality: int = int(os.getenv("VISION_JPEG_QUALITY", "70"))
+    vision_max_completion_tokens: int = int(
+        os.getenv("VISION_MAX_COMPLETION_TOKENS", "2500")
+    )
+    text_max_chars: int = int(os.getenv("TEXT_MAX_CHARS", "8000"))
+    text_max_completion_tokens: int = int(
+        os.getenv("TEXT_MAX_COMPLETION_TOKENS", "2000")
+    )
+    chat_max_completion_tokens: int = int(
+        os.getenv("CHAT_MAX_COMPLETION_TOKENS", "250")
+    )
+    max_pdf_pages: int = int(os.getenv("MAX_PDF_PAGES", "2"))
     ocr_languages: str = os.getenv("OCR_LANGUAGES", "en,hi")
     confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.75"))
-    # Speed knobs — target <10s for typical 2-page digital PDFs
-    pdf_render_scale: float = float(os.getenv("PDF_RENDER_SCALE", "1.5"))
+    # Speed knobs — prefer PDF text path to avoid vision entirely
+    pdf_render_scale: float = float(os.getenv("PDF_RENDER_SCALE", "1.25"))
     prefer_pdf_text: bool = os.getenv("PREFER_PDF_TEXT", "true").lower() == "true"
-    pdf_text_min_chars: int = int(os.getenv("PDF_TEXT_MIN_CHARS", "180"))
+    pdf_text_min_chars: int = int(os.getenv("PDF_TEXT_MIN_CHARS", "120"))
     skip_vlm_min_ocr_confidence: float = float(
         os.getenv("SKIP_VLM_MIN_OCR_CONFIDENCE", "0.72")
     )
-    skip_vlm_min_text_chars: int = int(os.getenv("SKIP_VLM_MIN_TEXT_CHARS", "220"))
+    skip_vlm_min_text_chars: int = int(os.getenv("SKIP_VLM_MIN_TEXT_CHARS", "180"))
     warmup_models: bool = os.getenv("WARMUP_MODELS", "true").lower() == "true"
     warmup_vlm: bool = os.getenv("WARMUP_VLM", "false").lower() == "true"
 
