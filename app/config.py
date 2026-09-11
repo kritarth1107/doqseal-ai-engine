@@ -49,14 +49,17 @@ class Settings:
     vision_max_completion_tokens: int = int(
         os.getenv("VISION_MAX_COMPLETION_TOKENS", "3000")
     )
-    text_max_chars: int = int(os.getenv("TEXT_MAX_CHARS", "120000"))
+    text_max_chars: int = int(os.getenv("TEXT_MAX_CHARS", "45000"))
     text_max_completion_tokens: int = int(
-        os.getenv("TEXT_MAX_COMPLETION_TOKENS", "4000")
+        os.getenv("TEXT_MAX_COMPLETION_TOKENS", "3500")
     )
+    text_chunk_parallelism: int = int(os.getenv("TEXT_CHUNK_PARALLELISM", "3"))
     chat_max_completion_tokens: int = int(
         os.getenv("CHAT_MAX_COMPLETION_TOKENS", "250")
     )
     max_pdf_pages: int = int(os.getenv("MAX_PDF_PAGES", "40"))
+    # OCR/render cap — vision only uses max_vision_pages; never OCR 40 pages for demos
+    max_ocr_pages: int = int(os.getenv("MAX_OCR_PAGES", "8"))
     max_vision_pages: int = int(os.getenv("MAX_VISION_PAGES", "4"))
     ocr_languages: str = os.getenv("OCR_LANGUAGES", "en,hi")
     confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.75"))

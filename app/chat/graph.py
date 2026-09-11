@@ -15,7 +15,7 @@ logger = logging.getLogger("doqseal.chat.graph")
 
 STUB_ANSWER = (
     "I'm running in stub mode because no chat LLM is available. "
-    "Configure Azure OpenAI (GPT-4o) or Ollama to get live answers grounded "
+    "Configure Azure OpenAI (GPT-5.4) or Ollama to get live answers grounded "
     "in your indexed documents."
 )
 
@@ -33,30 +33,35 @@ class ChatState(TypedDict):
 
 def _build_prompt(message: str, context: list[dict[str, Any]]) -> str:
     if not context:
-        return (
-            "You are DoqSeal, a helpful document assistant. "
-            "No indexed document context was retrieved. "
-            "Answer clearly and note when information may be missing.\n\n"
-            f"User: {message}\n\nAssistant:"
-        )
+        return f"Answer briefly.\nUser: {_clip_msg(message)}\nAssistant:"
 
     context_block = "\n\n".join(
-        f"[{idx + 1}] documentId={chunk.get('documentId', 'unknown')}\n"
-        f"{chunk.get('snippet', '')}"
-        for idx, chunk in enumerate(context)
+        f"[{idx + 1}] {chunk.get('documentId', '?')}: "
+        f"{_clip_msg(str(chunk.get('snippet', '')), 400)}"
+        for idx, chunk in enumerate(context[:4])
     )
     return (
-        "You are DoqSeal, a helpful document assistant. "
-        "Use only the context below. Cite sources by document id when relevant.\n\n"
+        "Answer using only this context. Cite document ids. Be brief.\n\n"
         f"Context:\n{context_block}\n\n"
-        f"User: {message}\n\nAssistant:"
+        f"User: {_clip_msg(message)}\nAssistant:"
     )
+
+
+def _clip_msg(text: str, limit: int = 600) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
 
 
 def _call_azure_openai_chat(prompt: str) -> str | None:
     endpoint = (settings.azure_openai_endpoint or "").rstrip("/")
     key = settings.azure_openai_api_key or ""
-    deployment = settings.azure_openai_deployment or "gpt-4o"
+    deployment = (
+        settings.azure_openai_text_deployment
+        or settings.azure_openai_deployment
+        or "gpt-4.1-mini"
+    )
     if not endpoint or not key:
         return None
     url = (
@@ -65,14 +70,9 @@ def _call_azure_openai_chat(prompt: str) -> str | None:
     )
     payload = {
         "messages": [
-            {
-                "role": "system",
-                "content": "You are DoqSeal, a precise document intelligence assistant.",
-            },
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.2,
-        "max_tokens": 800,
+        "max_completion_tokens": settings.chat_max_completion_tokens,
     }
     try:
         with httpx.Client(timeout=45.0) as client:

@@ -1,7 +1,10 @@
 import json
 import logging
+import threading
+import time
 
 import pika
+from pika.exceptions import AMQPConnectionError, StreamLostError, ConnectionClosedByBroker
 
 from app.config import settings
 from app.db.mongo import (
@@ -15,12 +18,34 @@ from app.db.mongo import (
 from app.pipeline.runner import run_extraction_pipeline
 from app.rag.indexer import index_extraction
 from app.webhooks import dispatch_project_webhooks
+from app.worker_heartbeat import touch_heartbeat
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("doqseal.worker")
 
+RECONNECT_BASE_SEC = 2
+RECONNECT_MAX_SEC = 60
+
+
+def _index_rag_async(**kwargs) -> None:
+    """RAG must never block the next extraction job (demo latency)."""
+
+    def _run() -> None:
+        try:
+            indexed = index_extraction(**kwargs)
+            logger.info(
+                "RAG indexed %d chunks for job %s",
+                indexed,
+                kwargs.get("job_id"),
+            )
+        except Exception:
+            logger.exception("RAG indexing failed for job %s", kwargs.get("job_id"))
+
+    threading.Thread(target=_run, name="rag-index", daemon=True).start()
+
 
 def process_job(job_id: str) -> None:
+    touch_heartbeat()
     job = load_job(job_id)
     if not job:
         raise ValueError(f"Job not found: {job_id}")
@@ -139,6 +164,7 @@ def process_job(job_id: str) -> None:
         extraction_payload.get("strategy"),
         extraction_payload.get("status"),
     )
+    touch_heartbeat()
 
     if project_id:
         try:
@@ -156,23 +182,20 @@ def process_job(job_id: str) -> None:
         except Exception:
             logger.exception("Webhook dispatch failed for job %s", job_id)
 
-    try:
-        indexed = index_extraction(
-            organisation_id=organisation_id,
-            document_id=document_id,
-            job_id=job_id,
-            project_id=project_id,
-            uploaded_by=document.get("uploadedBy"),
-            shared_with_organisation=document.get("sharedWithOrganisation") is not False,
-            ocr_full_text=extraction_payload.get("ocrFullText"),
-            extraction_data=extraction_payload.get("data"),
-        )
-        logger.info("RAG indexed %d chunks for job %s", indexed, job_id)
-    except Exception:
-        logger.exception("RAG indexing failed for job %s", job_id)
+    _index_rag_async(
+        organisation_id=organisation_id,
+        document_id=document_id,
+        job_id=job_id,
+        project_id=project_id,
+        uploaded_by=document.get("uploadedBy"),
+        shared_with_organisation=document.get("sharedWithOrganisation") is not False,
+        ocr_full_text=extraction_payload.get("ocrFullText"),
+        extraction_data=extraction_payload.get("data"),
+    )
 
 
 def on_message(channel, method, _properties, body):
+    touch_heartbeat()
     try:
         payload = json.loads(body.decode("utf-8"))
         job_id = payload.get("jobId")
@@ -207,7 +230,40 @@ def on_message(channel, method, _properties, body):
                         )
         except Exception:
             logger.exception("Failed to mark job as failed")
-        channel.basic_ack(delivery_tag=method.delivery_tag)
+        try:
+            channel.basic_ack(delivery_tag=method.delivery_tag)
+        except Exception:
+            logger.exception("Failed to ack after error")
+    finally:
+        touch_heartbeat()
+
+
+def _consume_forever() -> None:
+    """Connect to RabbitMQ and consume until the connection drops."""
+    params = pika.URLParameters(settings.amqp_uri)
+    params.heartbeat = 30
+    params.blocked_connection_timeout = 300
+
+    connection = pika.BlockingConnection(params)
+    channel = connection.channel()
+    channel.queue_declare(queue=settings.extraction_queue, durable=True)
+    channel.basic_qos(prefetch_count=1)
+    channel.basic_consume(
+        queue=settings.extraction_queue,
+        on_message_callback=on_message,
+    )
+
+    logger.info(
+        "DoqSeal extraction worker listening on queue '%s' (mode=%s)",
+        settings.extraction_queue,
+        settings.extraction_mode,
+    )
+    touch_heartbeat()
+
+    # Keep heartbeat fresh while idle (pika process_data_events)
+    while connection.is_open:
+        connection.process_data_events(time_limit=1)
+        touch_heartbeat()
 
 
 def start_worker() -> None:
@@ -227,21 +283,23 @@ def start_worker() -> None:
             except Exception:
                 logger.exception("VLM warmup failed (continuing)")
 
-    connection = pika.BlockingConnection(pika.URLParameters(settings.amqp_uri))
-    channel = connection.channel()
-    channel.queue_declare(queue=settings.extraction_queue, durable=True)
-    channel.basic_qos(prefetch_count=1)
-    channel.basic_consume(
-        queue=settings.extraction_queue,
-        on_message_callback=on_message,
-    )
-
-    logger.info(
-        "DoqSeal extraction worker listening on queue '%s' (mode=%s)",
-        settings.extraction_queue,
-        settings.extraction_mode,
-    )
-    channel.start_consuming()
+    touch_heartbeat()
+    delay = RECONNECT_BASE_SEC
+    while True:
+        try:
+            _consume_forever()
+            delay = RECONNECT_BASE_SEC
+        except (AMQPConnectionError, StreamLostError, ConnectionClosedByBroker, OSError) as err:
+            logger.error(
+                "RabbitMQ connection lost (%s); reconnecting in %ss",
+                err,
+                delay,
+            )
+        except Exception:
+            logger.exception("Unexpected worker error; reconnecting in %ss", delay)
+        touch_heartbeat()
+        time.sleep(delay)
+        delay = min(delay * 2, RECONNECT_MAX_SEC)
 
 
 if __name__ == "__main__":

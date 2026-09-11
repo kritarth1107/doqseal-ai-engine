@@ -64,7 +64,25 @@ def _vision_or_ocr(
     is_image: bool,
     pdf_text: str = "",
 ) -> tuple[Any, dict[str, Any]]:
-    pages = load_document_pages(file_bytes, mime_type)
+    pages = load_document_pages(
+        file_bytes,
+        mime_type,
+        max_pages=(
+            settings.max_vision_pages
+            if (
+                settings.vlm_provider.lower() == "azure_openai"
+                and azure_openai_configured()
+                and mode != "ocr_only"
+                and (
+                    bool(project.get("_forceAi"))
+                    or bool((project.get("_userContext") or "").strip())
+                    or is_image
+                    or (settings.skip_ocr_for_vision and is_image)
+                )
+            )
+            else settings.max_ocr_pages
+        ),
+    )
     if not pages:
         raise ValueError("No pages could be loaded from document")
 
@@ -84,6 +102,8 @@ def _vision_or_ocr(
     )
 
     if fast_vision:
+        # Only render/vision the pages we will send to the model
+        pages = pages[: max(1, settings.max_vision_pages)]
         ocr = _empty_ocr()
         try:
             extraction = extract_with_azure_openai(project, pages)
@@ -115,6 +135,8 @@ def _vision_or_ocr(
                 extraction["vlmError"] = f"{error}; {ollama_err}"
             return ocr, extraction
 
+    # OCR path: keep page count bounded for demo latency
+    pages = pages[: max(1, settings.max_ocr_pages)]
     ocr = run_ocr(pages)
     logger.info(
         "OCR complete: %d lines, avg confidence %.2f (image=%s force_ai=%s)",

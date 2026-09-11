@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+import os
 
 from app.chat import run_chat
 from app.db.mongo import get_db
@@ -31,6 +32,7 @@ def health():
     import httpx
 
     from app.config import settings
+    from app.worker_heartbeat import heartbeat_age_seconds
 
     checks: dict[str, str] = {}
     status = "ok"
@@ -41,6 +43,17 @@ def health():
     except Exception:
         checks["mongodb"] = "down"
         status = "unhealthy"
+
+    age = heartbeat_age_seconds()
+    stale_limit = float(os.getenv("WORKER_HEARTBEAT_STALE_SEC", "180"))
+    if age is None:
+        checks["extraction_worker"] = "missing"
+        status = "unhealthy"
+    elif age > stale_limit:
+        checks["extraction_worker"] = "stale"
+        status = "unhealthy"
+    else:
+        checks["extraction_worker"] = "up"
 
     try:
         with httpx.Client(timeout=3.0) as client:

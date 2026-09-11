@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import httpx
@@ -628,15 +629,19 @@ def extract_with_azure_openai(
         raise ValueError("No pages available for vision extraction")
 
     mode = _mode(project)
+    # Honor VISION_DETAIL=low for normal demos; only bump on explicit reprocess / user context
     force_detail = (
         bool(project.get("_forceAi"))
         or bool((project.get("_userContext") or "").strip())
-        or mode in {"rich", "open", "schema"}
     )
-    detail = "high" if force_detail else settings.vision_detail
+    detail = "high" if force_detail else (settings.vision_detail or "low")
     max_side = settings.vision_max_side_high if force_detail else settings.vision_max_side
     quality = settings.vision_jpeg_quality
-    max_tokens = max(settings.vision_max_completion_tokens, 3000)
+    max_tokens = (
+        max(settings.vision_max_completion_tokens, 3000)
+        if force_detail
+        else max(min(settings.vision_max_completion_tokens, 2200), 1200)
+    )
     vision_pages = pages[: max(1, int(getattr(settings, "max_vision_pages", 4) or 4))]
 
     content: list[dict[str, Any]] = [
@@ -694,7 +699,7 @@ def extract_text_with_azure_openai(
     if not chunks:
         raise ValueError("No text available for extraction")
 
-    max_tokens = max(settings.text_max_completion_tokens, 3500)
+    max_tokens = max(settings.text_max_completion_tokens, 2500)
     logger.info(
         "Azure OpenAI text extract deployment=%s chunks=%d total_chars=%d "
         "mode=%s max_tokens=%d",
@@ -705,8 +710,7 @@ def extract_text_with_azure_openai(
         max_tokens,
     )
 
-    partials: list[dict[str, Any]] = []
-    for index, chunk in enumerate(chunks):
+    def _extract_chunk(index: int, chunk: str) -> tuple[int, dict[str, Any]]:
         chunk_prompt = prompt
         if len(chunks) > 1:
             chunk_prompt = (
@@ -723,7 +727,22 @@ def extract_text_with_azure_openai(
             deployment=deployment,
             max_tokens=max_tokens,
         )
-        partials.append(partial)
+        return index, partial
+
+    if len(chunks) == 1:
+        partials = [_extract_chunk(0, chunks[0])[1]]
+    else:
+        workers = max(1, min(int(settings.text_chunk_parallelism or 3), len(chunks)))
+        ordered: dict[int, dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [
+                pool.submit(_extract_chunk, index, chunk)
+                for index, chunk in enumerate(chunks)
+            ]
+            for fut in as_completed(futures):
+                index, partial = fut.result()
+                ordered[index] = partial
+        partials = [ordered[i] for i in range(len(chunks))]
 
     parsed = _merge_partial_extractions(
         partials, deployment=deployment, source_label=source_label
