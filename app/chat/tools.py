@@ -125,6 +125,116 @@ def search_documents(
     return chunks
 
 
+_RX_RE = re.compile(
+    r"prescri|\brx\b|medicine|medicines|tablet|dosage|investigat",
+    re.IGNORECASE,
+)
+
+
+def _visible_to_user(doc: dict[str, Any], user_id: str | None) -> bool:
+    if not user_id:
+        return True
+    shared = doc.get("sharedWithOrganisation")
+    uploaded_by = doc.get("uploadedBy")
+    if shared is False and uploaded_by and uploaded_by != user_id:
+        return False
+    return True
+
+
+def _looks_like_prescription(blob: str) -> bool:
+    return bool(_RX_RE.search(blob or ""))
+
+
+def list_document_library(
+    organisation_id: str,
+    *,
+    project_id: str | None = None,
+    user_id: str | None = None,
+    limit: int = 80,
+) -> dict[str, Any]:
+    """Catalogue of Drive/project documents the user can see, for count questions."""
+    db = get_db()
+    query: dict[str, Any] = {
+        "organisationId": organisation_id,
+        "$or": [{"deletedAt": None}, {"deletedAt": {"$exists": False}}],
+    }
+    if project_id:
+        query["projectId"] = project_id
+
+    cursor = (
+        db.documents.find(
+            query,
+            {
+                "_id": 0,
+                "documentId": 1,
+                "projectId": 1,
+                "originalFilename": 1,
+                "displayTitle": 1,
+                "status": 1,
+                "uploadedBy": 1,
+                "sharedWithOrganisation": 1,
+            },
+        )
+        .sort("createdAt", -1)
+        .limit(max(limit * 3, 120))
+    )
+
+    docs = [doc for doc in cursor if _visible_to_user(doc, user_id)][:limit]
+    ids = [d["documentId"] for d in docs if d.get("documentId")]
+    extraction_bits: dict[str, str] = {}
+    if ids:
+        for row in db.extractions.find(
+            {"documentId": {"$in": ids}},
+            {
+                "_id": 0,
+                "documentId": 1,
+                "data.summary": 1,
+                "data.suggested_title": 1,
+                "data.document_type": 1,
+                "data.title": 1,
+                "data.medicines": 1,
+            },
+        ):
+            data = row.get("data") or {}
+            medicines = data.get("medicines")
+            med_hint = ""
+            if isinstance(medicines, list) and medicines:
+                med_hint = f" medicines={len(medicines)}"
+            extraction_bits[row.get("documentId") or ""] = (
+                " ".join(
+                    str(data.get(key) or "")
+                    for key in ("suggested_title", "title", "document_type", "summary")
+                )
+                + med_hint
+            )
+
+    items: list[dict[str, Any]] = []
+    prescription_count = 0
+    for doc in docs:
+        title = (doc.get("displayTitle") or doc.get("originalFilename") or "Untitled").strip()
+        filename = (doc.get("originalFilename") or "").strip()
+        extra = extraction_bits.get(doc.get("documentId") or "", "")
+        is_rx = _looks_like_prescription(f"{title} {filename} {extra}")
+        if is_rx:
+            prescription_count += 1
+        items.append(
+            {
+                "documentId": doc.get("documentId"),
+                "projectId": doc.get("projectId"),
+                "title": title,
+                "filename": filename,
+                "status": doc.get("status"),
+                "prescription": is_rx,
+            }
+        )
+
+    return {
+        "total": len(items),
+        "prescriptionCount": prescription_count,
+        "items": items,
+    }
+
+
 def get_extraction(document_id: str) -> dict[str, Any] | None:
     db = get_db()
     extraction = db.extractions.find_one({"documentId": document_id})
