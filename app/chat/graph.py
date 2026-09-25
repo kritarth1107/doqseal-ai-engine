@@ -46,6 +46,8 @@ def _intent(message: str) -> str:
         return "count_prescriptions"
     if about_invoice and (counting or listing):
         return "count_invoices" if counting or not listing else "list_invoices"
+    if re.search(r"\bnotes?\b", text) and (counting or listing):
+        return "count_notes"
     if counting and re.search(r"\bdocuments?\b|\bfiles?\b", text):
         return "count_documents"
     return "open"
@@ -59,19 +61,47 @@ def _titles(items: list[dict[str, Any]]) -> str:
     )
 
 
+def _md_cell(value: Any) -> str:
+    text = str(value or "—").replace("|", "/").replace("\n", " ").strip()
+    return text or "—"
+
+
+def _markdown_table(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    shown = rows[:40]
+    lines = ["| Document | Type | File |", "| --- | --- | --- |"]
+    for row in shown:
+        kind = str(row.get("kind") or "document").replace("_", " ").title()
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(row.get("title") or row.get("filename") or "Untitled"),
+                    kind,
+                    _md_cell(row.get("filename")),
+                ]
+            )
+            + " |"
+        )
+    table = "\n".join(lines)
+    if len(rows) > len(shown):
+        table += f"\n\n…and {len(rows) - len(shown)} more."
+    return table
+
+
+def _with_table(summary: str, rows: list[dict[str, Any]]) -> str:
+    table = _markdown_table(rows)
+    if not table:
+        return summary
+    return f"{summary}\n\n{table}"
+
+
 def _inventory_answer(intent: str, library: dict[str, Any]) -> str | None:
     items = list(library.get("items") or [])
     prescriptions = [item for item in items if item.get("kind") == "prescription"]
     invoices = [item for item in items if item.get("kind") == "invoice"]
-
-    def _bullets(rows: list[dict[str, Any]]) -> str:
-        if not rows:
-            return ""
-        lines = [
-            f"{index}. {row.get('title') or row.get('filename') or 'Untitled'}"
-            for index, row in enumerate(rows, start=1)
-        ]
-        return "\n" + "\n".join(lines)
+    notes = [item for item in items if item.get("kind") == "note"]
 
     if intent == "count_prescriptions":
         n = len(prescriptions)
@@ -81,27 +111,32 @@ def _inventory_answer(intent: str, library: dict[str, Any]) -> str | None:
                 f"You have 0 prescriptions. I checked {len(items)} document"
                 f"{'' if len(items) == 1 else 's'} in Drive and none are prescriptions."
             )
-        return f"You have {n} {noun} in Drive.{_bullets(prescriptions)}"
+        return _with_table(f"You have {n} {noun} in Drive.", prescriptions)
     if intent == "list_prescriptions":
         if not prescriptions:
             return "I didn't find any prescriptions in the documents you can see."
-        return f"These are the prescriptions in Drive:{_bullets(prescriptions)}"
+        return _with_table("These are the prescriptions in Drive.", prescriptions)
     if intent == "count_invoices":
         n = len(invoices)
         noun = "invoice" if n == 1 else "invoices"
-        return f"You have {n} {noun} in Drive.{_bullets(invoices)}"
+        return _with_table(f"You have {n} {noun} in Drive.", invoices)
     if intent == "list_invoices":
         if not invoices:
             return "I didn't find any invoices in the documents you can see."
-        return f"These are the invoices in Drive:{_bullets(invoices)}"
+        return _with_table("These are the invoices in Drive.", invoices)
+    if intent == "count_notes":
+        n = len(notes)
+        noun = "note" if n == 1 else "notes"
+        return _with_table(f"You have {n} {noun} in Drive.", notes)
     if intent == "count_documents":
-        return (
+        summary = (
             f"You have {len(items)} documents in Drive "
             f"({library.get('prescriptionCount', 0)} prescriptions, "
             f"{library.get('invoiceCount', 0)} invoices, "
             f"{library.get('noteCount', 0)} notes, "
             f"{library.get('otherCount', 0)} other)."
         )
+        return _with_table(summary, items)
     return None
 
 
@@ -139,6 +174,20 @@ def _thinking_for(message: str, intent: str, library: dict[str, Any]) -> list[di
             {
                 "title": "Match invoices only",
                 "detail": _titles(invoices),
+            }
+        )
+    elif intent == "count_notes":
+        steps.append(
+            {
+                "title": "Match notes only",
+                "detail": _titles(notes),
+            }
+        )
+    elif intent == "count_documents":
+        steps.append(
+            {
+                "title": "List every file",
+                "detail": f"{len(items)} document{'s' if len(items) != 1 else ''} in Drive.",
             }
         )
     else:
@@ -340,6 +389,7 @@ def format_node(state: ChatState) -> dict[str, Any]:
                 "projectId": item.get("projectId"),
                 "title": title,
                 "kind": kind,
+                "filename": item.get("filename") or "",
                 "snippet": f"{kind.replace('_', ' ').title()}: {title}",
             }
         )
@@ -348,8 +398,10 @@ def format_node(state: ChatState) -> dict[str, Any]:
         matched = [item for item in items if item.get("kind") == "prescription"]
     elif intent in {"count_invoices", "list_invoices"}:
         matched = [item for item in items if item.get("kind") == "invoice"]
+    elif intent == "count_notes":
+        matched = [item for item in items if item.get("kind") == "note"]
     elif intent == "count_documents":
-        matched = items[:12]
+        matched = items[:40]
     else:
         matched = []
         by_id = {item.get("documentId"): item for item in items}
@@ -368,7 +420,7 @@ def format_node(state: ChatState) -> dict[str, Any]:
                 )
         return {"citations": citations[:8]}
 
-    for item in matched[:12]:
+    for item in matched[:40]:
         _add(item)
     return {"citations": citations}
 
