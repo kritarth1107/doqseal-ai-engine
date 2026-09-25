@@ -85,5 +85,25 @@ class Settings:
     ollama_url: str = os.getenv("OLLAMA_URL", "http://localhost:11434")
     llm_model: str = os.getenv("LLM_MODEL", "qwen3-vl:8b")
 
+    # Chat pipeline settings
+    chat_context_tokens: int = int(os.getenv("CHAT_CONTEXT_TOKENS", "16000"))
+    chat_output_tokens: int = int(os.getenv("CHAT_OUTPUT_TOKENS", "2000"))
+    chat_temperature: float = float(os.getenv("CHAT_TEMPERATURE", "0.1"))
+    chat_history_turns: int = int(os.getenv("CHAT_HISTORY_TURNS", "10"))
+    chat_rerank_top_k: int = int(os.getenv("CHAT_RERANK_TOP_K", "8"))
+    chat_retrieve_top_k: int = int(os.getenv("CHAT_RETRIEVE_TOP_K", "25"))
+
+    # Guardrail thresholds (can be overridden per-org)
+    guardrail_min_rerank_score: float = float(
+        os.getenv("GUARDRAIL_MIN_RERANK_SCORE", "0.25")
+    )
+    guardrail_min_chunks: int = int(os.getenv("GUARDRAIL_MIN_CHUNKS", "1"))
+    guardrail_coverage_threshold: float = float(
+        os.getenv("GUARDRAIL_COVERAGE_THRESHOLD", "0.6")
+    )
+
+    # Streaming settings
+    stream_heartbeat_seconds: int = int(os.getenv("STREAM_HEARTBEAT_SECONDS", "15"))
+
 
 settings = Settings()
