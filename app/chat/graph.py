@@ -36,16 +36,17 @@ class ChatState(TypedDict):
 
 def _intent(message: str) -> str:
     text = (message or "").lower()
-    counting = bool(re.search(r"how many|how much|count|number of|total", text))
-    listing = bool(re.search(r"\blist\b|\bshow\b|\bwhich\b|\bwhat are\b", text))
-    if re.search(r"prescri|\brx\b", text):
-        if counting:
-            return "count_prescriptions"
-        if listing:
+    about_rx = bool(re.search(r"prescri|\brx\b", text))
+    about_invoice = bool(re.search(r"invoice|cash\s*memo|receipt|\bbills?\b", text))
+    counting = bool(re.search(r"how many|how much|\bcount\b|number of|\btotal\b|\bhave\b", text))
+    listing = bool(re.search(r"\blist\b|\bshow\b|\bwhich\b|\bwhat are\b|\bname\b", text))
+    if about_rx and not about_invoice:
+        if listing and not counting:
             return "list_prescriptions"
-    if re.search(r"invoice|cash memo|receipt|\bbill\b", text) and (counting or listing):
-        return "count_invoices" if counting else "list_invoices"
-    if re.search(r"\bdocuments?\b|\bfiles?\b", text) and counting:
+        return "count_prescriptions"
+    if about_invoice and (counting or listing):
+        return "count_invoices" if counting or not listing else "list_invoices"
+    if counting and re.search(r"\bdocuments?\b|\bfiles?\b", text):
         return "count_documents"
     return "open"
 
@@ -130,7 +131,7 @@ def _thinking_for(message: str, intent: str, library: dict[str, Any]) -> list[di
         steps.append(
             {
                 "title": "Match prescriptions only",
-                "detail": _titles(prescriptions),
+                "detail": _titles(prescriptions) if prescriptions else "No prescription files in Drive.",
             }
         )
     elif "invoice" in intent:
