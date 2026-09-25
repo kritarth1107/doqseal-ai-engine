@@ -23,6 +23,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     citations: list[dict]
+    thinking: list[dict] = Field(default_factory=list)
     mode: str
 
 

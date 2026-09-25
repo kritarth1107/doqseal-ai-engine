@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, TypedDict
 
 import httpx
@@ -29,7 +30,130 @@ class ChatState(TypedDict):
     library: dict[str, Any]
     answer: str
     citations: list[dict[str, Any]]
+    thinking: list[dict[str, str]]
     mode: str
+
+
+def _intent(message: str) -> str:
+    text = (message or "").lower()
+    counting = bool(re.search(r"how many|how much|count|number of|total", text))
+    listing = bool(re.search(r"\blist\b|\bshow\b|\bwhich\b|\bwhat are\b", text))
+    if re.search(r"prescri|\brx\b", text):
+        if counting:
+            return "count_prescriptions"
+        if listing:
+            return "list_prescriptions"
+    if re.search(r"invoice|cash memo|receipt|\bbill\b", text) and (counting or listing):
+        return "count_invoices" if counting else "list_invoices"
+    if re.search(r"\bdocuments?\b|\bfiles?\b", text) and counting:
+        return "count_documents"
+    return "open"
+
+
+def _titles(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "none"
+    return "; ".join(
+        (item.get("title") or item.get("filename") or "Untitled") for item in items[:12]
+    )
+
+
+def _inventory_answer(intent: str, library: dict[str, Any]) -> str | None:
+    items = list(library.get("items") or [])
+    prescriptions = [item for item in items if item.get("kind") == "prescription"]
+    invoices = [item for item in items if item.get("kind") == "invoice"]
+
+    def _bullets(rows: list[dict[str, Any]]) -> str:
+        if not rows:
+            return ""
+        lines = [
+            f"{index}. {row.get('title') or row.get('filename') or 'Untitled'}"
+            for index, row in enumerate(rows, start=1)
+        ]
+        return "\n" + "\n".join(lines)
+
+    if intent == "count_prescriptions":
+        n = len(prescriptions)
+        noun = "prescription" if n == 1 else "prescriptions"
+        if n == 0:
+            return (
+                f"You have 0 prescriptions. I checked {len(items)} document"
+                f"{'' if len(items) == 1 else 's'} in Drive and none are prescriptions."
+            )
+        return f"You have {n} {noun} in Drive.{_bullets(prescriptions)}"
+    if intent == "list_prescriptions":
+        if not prescriptions:
+            return "I didn't find any prescriptions in the documents you can see."
+        return f"These are the prescriptions in Drive:{_bullets(prescriptions)}"
+    if intent == "count_invoices":
+        n = len(invoices)
+        noun = "invoice" if n == 1 else "invoices"
+        return f"You have {n} {noun} in Drive.{_bullets(invoices)}"
+    if intent == "list_invoices":
+        if not invoices:
+            return "I didn't find any invoices in the documents you can see."
+        return f"These are the invoices in Drive:{_bullets(invoices)}"
+    if intent == "count_documents":
+        return (
+            f"You have {len(items)} documents in Drive "
+            f"({library.get('prescriptionCount', 0)} prescriptions, "
+            f"{library.get('invoiceCount', 0)} invoices, "
+            f"{library.get('noteCount', 0)} notes, "
+            f"{library.get('otherCount', 0)} other)."
+        )
+    return None
+
+
+def _thinking_for(message: str, intent: str, library: dict[str, Any]) -> list[dict[str, str]]:
+    items = list(library.get("items") or [])
+    prescriptions = [item for item in items if item.get("kind") == "prescription"]
+    invoices = [item for item in items if item.get("kind") == "invoice"]
+    notes = [item for item in items if item.get("kind") == "note"]
+    steps = [
+        {
+            "title": "Read the question",
+            "detail": _clip_msg(message, 180),
+        },
+        {
+            "title": "Scan Drive",
+            "detail": f"Loaded {len(items)} visible document{'s' if len(items) != 1 else ''} from the library.",
+        },
+        {
+            "title": "Classify each file",
+            "detail": (
+                f"{len(prescriptions)} prescriptions, {len(invoices)} invoices, "
+                f"{len(notes)} notes, {library.get('otherCount', 0)} other."
+            ),
+        },
+    ]
+    if intent.startswith("count_prescription") or intent.startswith("list_prescription"):
+        steps.append(
+            {
+                "title": "Match prescriptions only",
+                "detail": _titles(prescriptions),
+            }
+        )
+    elif "invoice" in intent:
+        steps.append(
+            {
+                "title": "Match invoices only",
+                "detail": _titles(invoices),
+            }
+        )
+    else:
+        steps.append(
+            {
+                "title": "Pull supporting excerpts",
+                "detail": "Using the classified library plus the closest indexed passages.",
+            }
+        )
+    steps.append(
+        {
+            "title": "Write the answer",
+            "detail": "Counts come from the classified Drive list, not a guess.",
+        }
+    )
+    return steps
 
 
 def _library_block(library: dict[str, Any] | None) -> str:
@@ -43,7 +167,7 @@ def _library_block(library: dict[str, Any] | None) -> str:
 
     lines = []
     for item in items[:40]:
-        kind = "prescription" if item.get("prescription") else "document"
+        kind = item.get("kind") or ("prescription" if item.get("prescription") else "document")
         lines.append(
             f"- [{kind}] {item.get('title') or 'Untitled'} "
             f"(id={item.get('documentId') or '?'}, file={item.get('filename') or '?'})"
@@ -58,7 +182,7 @@ def _library_block(library: dict[str, Any] | None) -> str:
         + "\n".join(lines)
         + more
         + "\nWhen the user asks how many prescriptions (or documents) they have, "
-        "use these counts. Do not say you cannot access their files."
+        "use these counts exactly. Invoices, cash memos, and notes are not prescriptions.\n"
     )
 
 
@@ -174,51 +298,77 @@ def retrieve_node(state: ChatState) -> dict[str, Any]:
 
 
 def generate_node(state: ChatState) -> dict[str, Any]:
+    library = state.get("library") or {}
+    intent = _intent(state["message"])
+    thinking = _thinking_for(state["message"], intent, library)
+    direct = _inventory_answer(intent, library)
+    if direct:
+        return {"answer": direct, "mode": "library", "thinking": thinking}
+
     prompt = _build_prompt(
         state["message"],
         state.get("context") or [],
-        state.get("library"),
+        library,
     )
-    # Prefer Azure OpenAI for chat; fall back to Ollama if configured.
     answer = _call_azure_openai_chat(prompt)
     if answer:
-        return {"answer": answer, "mode": "live"}
+        return {"answer": answer, "mode": "live", "thinking": thinking}
     answer = _call_ollama(prompt)
     if answer:
-        return {"answer": answer, "mode": "live"}
-    return {"answer": STUB_ANSWER, "mode": "stub"}
+        return {"answer": answer, "mode": "live", "thinking": thinking}
+    return {"answer": STUB_ANSWER, "mode": "stub", "thinking": thinking}
 
 
 def format_node(state: ChatState) -> dict[str, Any]:
+    intent = _intent(state["message"])
+    library = state.get("library") or {}
+    items = list(library.get("items") or [])
     citations: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    def _add(document_id: str | None, project_id: str | None, snippet: str) -> None:
+    def _add(item: dict[str, Any]) -> None:
+        document_id = item.get("documentId")
         if not document_id or document_id in seen:
             return
         seen.add(document_id)
+        title = item.get("title") or item.get("filename") or "Document"
+        kind = item.get("kind") or "document"
         citations.append(
             {
                 "documentId": document_id,
-                "projectId": project_id,
-                "snippet": snippet,
+                "projectId": item.get("projectId"),
+                "title": title,
+                "kind": kind,
+                "snippet": f"{kind.replace('_', ' ').title()}: {title}",
             }
         )
 
-    for chunk in state.get("context") or []:
-        _add(chunk.get("documentId"), chunk.get("projectId"), chunk.get("snippet", ""))
+    if intent in {"count_prescriptions", "list_prescriptions"}:
+        matched = [item for item in items if item.get("kind") == "prescription"]
+    elif intent in {"count_invoices", "list_invoices"}:
+        matched = [item for item in items if item.get("kind") == "invoice"]
+    elif intent == "count_documents":
+        matched = items[:12]
+    else:
+        matched = []
+        by_id = {item.get("documentId"): item for item in items}
+        for chunk in state.get("context") or []:
+            known = by_id.get(chunk.get("documentId"))
+            if known:
+                _add(known)
+            elif chunk.get("documentId"):
+                _add(
+                    {
+                        "documentId": chunk.get("documentId"),
+                        "projectId": chunk.get("projectId"),
+                        "title": (chunk.get("snippet") or "Document")[:80],
+                        "kind": "document",
+                    }
+                )
+        return {"citations": citations[:8]}
 
-    library = state.get("library") or {}
-    items = list(library.get("items") or [])
-    # Prefer prescription matches so "how many prescriptions" surfaces those files
-    items.sort(key=lambda item: 0 if item.get("prescription") else 1)
-    for item in items:
-        if len(citations) >= 8:
-            break
-        title = item.get("title") or item.get("filename") or "Document"
-        kind = "Prescription" if item.get("prescription") else "Document"
-        _add(item.get("documentId"), item.get("projectId"), f"{kind}: {title}")
-
+    for item in matched[:12]:
+        _add(item)
     return {"citations": citations}
 
 
@@ -254,11 +404,13 @@ def run_chat(
             "library": {"total": 0, "prescriptionCount": 0, "items": []},
             "answer": "",
             "citations": [],
+            "thinking": [],
             "mode": "stub",
         }
     )
     return {
         "answer": result.get("answer", STUB_ANSWER),
         "citations": result.get("citations") or [],
+        "thinking": result.get("thinking") or [],
         "mode": result.get("mode", "stub"),
     }

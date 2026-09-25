@@ -126,7 +126,15 @@ def search_documents(
 
 
 _RX_RE = re.compile(
-    r"prescri|\brx\b|medicine|medicines|tablet|dosage|investigat",
+    r"prescri|\brx\b|\bmedicine(s)?\b|\btablet(s)?\b|\bdosage\b|\binvestigation(s)?\b",
+    re.IGNORECASE,
+)
+_INVOICE_RE = re.compile(
+    r"\binvoice\b|\bcash\s*memo\b|\breceipt\b|\bgst\b|\btax invoice\b|\bbill\b",
+    re.IGNORECASE,
+)
+_NOTE_RE = re.compile(
+    r"\bnote\b|\bitem list\b|\bmemo\b|\bhandwritten\b",
     re.IGNORECASE,
 )
 
@@ -141,8 +149,21 @@ def _visible_to_user(doc: dict[str, Any], user_id: str | None) -> bool:
     return True
 
 
-def _looks_like_prescription(blob: str) -> bool:
-    return bool(_RX_RE.search(blob or ""))
+def classify_document(*, title: str, filename: str, extra: str, has_medicines: bool) -> str:
+    """Return prescription | invoice | note | document. Invoices never count as prescriptions."""
+    heading = f"{title} {filename}"
+    blob = f"{heading} {extra}"
+    if _INVOICE_RE.search(heading) or (
+        _INVOICE_RE.search(blob) and not _RX_RE.search(heading)
+    ):
+        return "invoice"
+    if _RX_RE.search(heading) or has_medicines:
+        return "prescription"
+    if _NOTE_RE.search(heading):
+        return "note"
+    if _RX_RE.search(extra or ""):
+        return "prescription"
+    return "document"
 
 
 def list_document_library(
@@ -181,7 +202,7 @@ def list_document_library(
 
     docs = [doc for doc in cursor if _visible_to_user(doc, user_id)][:limit]
     ids = [d["documentId"] for d in docs if d.get("documentId")]
-    extraction_bits: dict[str, str] = {}
+    extraction_bits: dict[str, dict[str, Any]] = {}
     if ids:
         for row in db.extractions.find(
             {"documentId": {"$in": ids}},
@@ -197,26 +218,28 @@ def list_document_library(
         ):
             data = row.get("data") or {}
             medicines = data.get("medicines")
-            med_hint = ""
-            if isinstance(medicines, list) and medicines:
-                med_hint = f" medicines={len(medicines)}"
-            extraction_bits[row.get("documentId") or ""] = (
-                " ".join(
+            extraction_bits[row.get("documentId") or ""] = {
+                "text": " ".join(
                     str(data.get(key) or "")
                     for key in ("suggested_title", "title", "document_type", "summary")
-                )
-                + med_hint
-            )
+                ),
+                "hasMedicines": isinstance(medicines, list) and len(medicines) > 0,
+                "medicineCount": len(medicines) if isinstance(medicines, list) else 0,
+            }
 
     items: list[dict[str, Any]] = []
-    prescription_count = 0
+    counts = {"prescription": 0, "invoice": 0, "note": 0, "document": 0}
     for doc in docs:
         title = (doc.get("displayTitle") or doc.get("originalFilename") or "Untitled").strip()
         filename = (doc.get("originalFilename") or "").strip()
-        extra = extraction_bits.get(doc.get("documentId") or "", "")
-        is_rx = _looks_like_prescription(f"{title} {filename} {extra}")
-        if is_rx:
-            prescription_count += 1
+        bits = extraction_bits.get(doc.get("documentId") or "", {})
+        kind = classify_document(
+            title=title,
+            filename=filename,
+            extra=str(bits.get("text") or ""),
+            has_medicines=bool(bits.get("hasMedicines")),
+        )
+        counts[kind] = counts.get(kind, 0) + 1
         items.append(
             {
                 "documentId": doc.get("documentId"),
@@ -224,13 +247,17 @@ def list_document_library(
                 "title": title,
                 "filename": filename,
                 "status": doc.get("status"),
-                "prescription": is_rx,
+                "kind": kind,
+                "prescription": kind == "prescription",
             }
         )
 
     return {
         "total": len(items),
-        "prescriptionCount": prescription_count,
+        "prescriptionCount": counts.get("prescription", 0),
+        "invoiceCount": counts.get("invoice", 0),
+        "noteCount": counts.get("note", 0),
+        "otherCount": counts.get("document", 0),
         "items": items,
     }
 
