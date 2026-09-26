@@ -15,7 +15,7 @@ from app.db.mongo import get_org_config
 logger = logging.getLogger("doqseal.chat.guardrails")
 
 SMALL_TALK_PATTERNS = [
-    r"^\s*(hi|hello|hey|good\s*(morning|afternoon|evening)|howdy)\s*[!.?]*\s*$",
+    r"^\s*(hi|hello|hey(\s+there)?|good\s*(morning|afternoon|evening)|howdy)\s*[!.?]*\s*$",
     r"^\s*(thanks?|thank\s*you|thx)\s*[!.?]*\s*$",
     r"^\s*(bye|goodbye|see\s*you|later)\s*[!.?]*\s*$",
     r"^\s*(what\s*can\s*you\s*do|help|what\s*are\s*you|who\s*are\s*you)\s*[?!.]*\s*$",
@@ -80,7 +80,7 @@ class GuardrailConfig:
     coverage_threshold: float = 0.6
 
     @classmethod
-    def for_org(cls, organisation_id: str) -> "GuardrailConfig":
+    def for_org(cls, organisation_id: str) -> GuardrailConfig:
         """Load config with per-org overrides."""
         config = cls(
             min_rerank_score=settings.guardrail_min_rerank_score,
@@ -185,9 +185,7 @@ def score_gate(
     if not chunks:
         return False, []
 
-    passing_chunks = [
-        c for c in chunks if c.get("score", 0) >= config.min_rerank_score
-    ]
+    passing_chunks = [c for c in chunks if c.get("score", 0) >= config.min_rerank_score]
 
     if len(passing_chunks) < config.min_chunks:
         return False, []
@@ -208,7 +206,7 @@ async def check_coverage(
         return False, [], "No relevant documents found"
 
     context_text = "\n\n".join(
-        f"[{i+1}] {sanitize_document_content(c.get('text', '')[:1500])}"
+        f"[{i + 1}] {sanitize_document_content(c.get('text', '')[:1500])}"
         for i, c in enumerate(chunks[:8])
     )
 
@@ -234,16 +232,13 @@ Rules:
             supporting_ids = result.get("supporting_ids", [])
             reason = result.get("reason")
 
-            supporting_chunks = [
-                chunks[i - 1] for i in supporting_ids
-                if 0 < i <= len(chunks)
-            ]
+            supporting_chunks = [chunks[i - 1] for i in supporting_ids if 0 < i <= len(chunks)]
 
             return covered, supporting_chunks, reason
     except Exception as exc:
         logger.warning("Coverage check failed: %s", exc)
 
-    return len(chunks) >= config.min_chunks, chunks[:config.min_chunks], None
+    return len(chunks) >= config.min_chunks, chunks[: config.min_chunks], None
 
 
 async def _call_coverage_check(prompt: str) -> dict[str, Any] | None:
@@ -275,9 +270,10 @@ async def _call_coverage_check(prompt: str) -> dict[str, Any] | None:
         )
         response.raise_for_status()
         body = response.json()
-        content = (body.get("choices", [{}])[0].get("message", {}).get("content", ""))
+        content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
 
         import json
+
         return json.loads(content)
 
 
@@ -304,12 +300,9 @@ def verify_citations(
     errors = []
 
     citation_pattern = re.compile(r"\[(\d+)\]")
-    used_citations = set(int(m) for m in citation_pattern.findall(answer))
+    used_citations = {int(m) for m in citation_pattern.findall(answer)}
 
-    chunk_texts = {
-        c.get("documentId", ""): c.get("text", "").lower()
-        for c in chunks
-    }
+    chunk_texts = {c.get("documentId", ""): c.get("text", "").lower() for c in chunks}
 
     citation_map = {c.n: c for c in citations}
 

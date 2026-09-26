@@ -1,8 +1,7 @@
 """Tests for streaming chat endpoint."""
 
 import json
-import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from tests.conftest import make_jwt
 
@@ -18,10 +17,12 @@ def parse_sse_events(content: str) -> list[dict]:
         if not line:
             if current_event and current_data:
                 try:
-                    events.append({
-                        "event": current_event,
-                        "data": json.loads(current_data),
-                    })
+                    events.append(
+                        {
+                            "event": current_event,
+                            "data": json.loads(current_data),
+                        }
+                    )
                 except json.JSONDecodeError:
                     pass
             current_event = None
@@ -51,7 +52,11 @@ class TestStreamingEndpoint:
         """Streaming endpoint returns text/event-stream."""
         token = make_jwt("org-a-id", "user-a-id", scope="chat")
 
-        with patch("app.chat.pipeline.generate_streaming") as mock_gen:
+        with (
+            patch("app.chat.guardrails.get_org_config", return_value=None),
+            patch("app.chat.pipeline.generate_streaming") as mock_gen,
+        ):
+
             async def mock_generator(*args, **kwargs):
                 yield "Test response"
 
@@ -73,7 +78,11 @@ class TestStreamingEndpoint:
         """Stream starts with run.started event."""
         token = make_jwt("org-a-id", "user-a-id", scope="chat")
 
-        with patch("app.chat.pipeline.generate_streaming") as mock_gen:
+        with (
+            patch("app.chat.guardrails.get_org_config", return_value=None),
+            patch("app.chat.pipeline.generate_streaming") as mock_gen,
+        ):
+
             async def mock_generator(*args, **kwargs):
                 yield "Test"
 
@@ -97,11 +106,12 @@ class TestStreamingEndpoint:
         """Small talk returns a decline event without generation."""
         token = make_jwt("org-a-id", "user-a-id", scope="chat")
 
-        response = client.post(
-            "/v1/chat/stream",
-            json={"message": "hi"},
-            headers={"Authorization": f"Bearer {token}"},
-        )
+        with patch("app.chat.guardrails.get_org_config", return_value=None):
+            response = client.post(
+                "/v1/chat/stream",
+                json={"message": "hi"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
 
         assert response.status_code == 200
         events = parse_sse_events(response.text)
@@ -113,14 +123,22 @@ class TestStreamingEndpoint:
         """Stream includes step events for real pipeline execution."""
         token = make_jwt("org-a-id", "user-a-id", scope="chat")
 
-        with patch("app.chat.pipeline.generate_streaming") as mock_gen:
+        with (
+            patch("app.chat.guardrails.get_org_config", return_value=None),
+            patch("app.chat.pipeline.generate_streaming") as mock_gen,
+        ):
+
             async def mock_generator(*args, **kwargs):
                 yield "Test response [1]."
 
             mock_gen.return_value = mock_generator()
 
             with patch("app.chat.guardrails.check_coverage", new_callable=AsyncMock) as mock_cov:
-                mock_cov.return_value = (True, [{"score": 0.8, "text": "test", "documentId": "doc-1"}], None)
+                mock_cov.return_value = (
+                    True,
+                    [{"score": 0.8, "text": "test", "documentId": "doc-1"}],
+                    None,
+                )
 
                 response = client.post(
                     "/v1/chat/stream",
@@ -137,11 +155,12 @@ class TestStreamingEndpoint:
         """Stream ends with run.completed event."""
         token = make_jwt("org-a-id", "user-a-id", scope="chat")
 
-        response = client.post(
-            "/v1/chat/stream",
-            json={"message": "hello"},
-            headers={"Authorization": f"Bearer {token}"},
-        )
+        with patch("app.chat.guardrails.get_org_config", return_value=None):
+            response = client.post(
+                "/v1/chat/stream",
+                json={"message": "hello"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
 
         events = parse_sse_events(response.text)
         event_types = [e["event"] for e in events]
@@ -157,25 +176,35 @@ class TestStreamingEventOrder:
         token = make_jwt("org-a-id", "user-a-id", scope="chat")
 
         chunks_data = [
-            {"score": 0.9, "text": "Test content", "documentId": "doc-1", "documentTitle": "Test Doc", "page": 1}
+            {
+                "score": 0.9,
+                "text": "Test content",
+                "documentId": "doc-1",
+                "documentTitle": "Test Doc",
+                "page": 1,
+            }
         ]
 
-        with patch("app.chat.tools.search_chunks", return_value=chunks_data):
-            with patch("app.chat.pipeline.generate_streaming") as mock_gen:
-                async def mock_generator(*args, **kwargs):
-                    yield "Based on the document [1], "
-                    yield "the answer is yes."
+        with (
+            patch("app.chat.guardrails.get_org_config", return_value=None),
+            patch("app.chat.tools.search_chunks", return_value=chunks_data),
+            patch("app.chat.pipeline.generate_streaming") as mock_gen,
+        ):
 
-                mock_gen.return_value = mock_generator()
+            async def mock_generator(*args, **kwargs):
+                yield "Based on the document [1], "
+                yield "the answer is yes."
 
-                with patch("app.chat.guardrails.check_coverage", new_callable=AsyncMock) as mock_cov:
-                    mock_cov.return_value = (True, chunks_data, None)
+            mock_gen.return_value = mock_generator()
 
-                    response = client.post(
-                        "/v1/chat/stream",
-                        json={"message": "Test question?"},
-                        headers={"Authorization": f"Bearer {token}"},
-                    )
+            with patch("app.chat.guardrails.check_coverage", new_callable=AsyncMock) as mock_cov:
+                mock_cov.return_value = (True, chunks_data, None)
+
+                response = client.post(
+                    "/v1/chat/stream",
+                    json={"message": "Test question?"},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
 
         events = parse_sse_events(response.text)
 
@@ -193,7 +222,10 @@ class TestStreamingEventOrder:
         """Declined responses have correct event order."""
         token = make_jwt("org-a-id", "user-a-id", scope="chat")
 
-        with patch("app.chat.tools.search_chunks", return_value=[]):
+        with (
+            patch("app.chat.guardrails.get_org_config", return_value=None),
+            patch("app.chat.tools.search_chunks", return_value=[]),
+        ):
             response = client.post(
                 "/v1/chat/stream",
                 json={"message": "What is the capital of France?"},
@@ -205,7 +237,9 @@ class TestStreamingEventOrder:
 
         if "decline" in event_types:
             decline_idx = event_types.index("decline")
-            completed_idx = event_types.index("run.completed") if "run.completed" in event_types else -1
+            completed_idx = (
+                event_types.index("run.completed") if "run.completed" in event_types else -1
+            )
             if completed_idx >= 0:
                 assert decline_idx < completed_idx
 
@@ -220,11 +254,12 @@ class TestStreamingCancellation:
         caplog.set_level(logging.INFO)
         token = make_jwt("org-a-id", "user-a-id", scope="chat")
 
-        response = client.post(
-            "/v1/chat/stream",
-            json={"message": "hi"},
-            headers={"Authorization": f"Bearer {token}"},
-        )
+        with patch("app.chat.guardrails.get_org_config", return_value=None):
+            response = client.post(
+                "/v1/chat/stream",
+                json={"message": "hi"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
 
         assert response.status_code == 200
 
@@ -241,15 +276,16 @@ class TestStreamingHistory:
             {"role": "assistant", "content": "You have 3 documents."},
         ]
 
-        response = client.post(
-            "/v1/chat/stream",
-            json={
-                "message": "Tell me more about the first one",
-                "history": history,
-                "conversationId": "conv-123",
-            },
-            headers={"Authorization": f"Bearer {token}"},
-        )
+        with patch("app.chat.guardrails.get_org_config", return_value=None):
+            response = client.post(
+                "/v1/chat/stream",
+                json={
+                    "message": "Tell me more about the first one",
+                    "history": history,
+                    "conversationId": "conv-123",
+                },
+                headers={"Authorization": f"Bearer {token}"},
+            )
 
         assert response.status_code == 200
 
@@ -262,13 +298,14 @@ class TestStreamingHistory:
             for i in range(30)
         ]
 
-        response = client.post(
-            "/v1/chat/stream",
-            json={
-                "message": "Follow up",
-                "history": history,
-            },
-            headers={"Authorization": f"Bearer {token}"},
-        )
+        with patch("app.chat.guardrails.get_org_config", return_value=None):
+            response = client.post(
+                "/v1/chat/stream",
+                json={
+                    "message": "Follow up",
+                    "history": history,
+                },
+                headers={"Authorization": f"Bearer {token}"},
+            )
 
         assert response.status_code == 200

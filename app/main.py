@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import time
-from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -102,10 +101,9 @@ def health():
     except Exception:
         checks["ollama"] = "down"
 
-    if (
-        (settings.azure_openai_endpoint or "").strip()
-        and (settings.azure_openai_api_key or "").strip()
-    ):
+    if (settings.azure_openai_endpoint or "").strip() and (
+        settings.azure_openai_api_key or ""
+    ).strip():
         checks["azure_openai"] = "configured"
     else:
         checks["azure_openai"] = "missing"

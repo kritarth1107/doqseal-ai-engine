@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -22,9 +22,6 @@ from app.chat.guardrails import (
     verify_citations,
 )
 from app.chat.tools import (
-    get_extraction_fields,
-    list_document_library,
-    list_documents,
     search_chunks,
 )
 from app.config import settings
@@ -123,7 +120,7 @@ def rewrite_query_with_history(
     if not history:
         return message
 
-    recent = history[-settings.chat_history_turns * 2:]
+    recent = history[-settings.chat_history_turns * 2 :]
     if not recent:
         return message
 
@@ -135,9 +132,7 @@ def rewrite_query_with_history(
     if not context_refs:
         return message
 
-    history_context = "\n".join(
-        f"{m.role}: {m.content[:200]}" for m in recent[-4:]
-    )
+    history_context = "\n".join(f"{m.role}: {m.content[:200]}" for m in recent[-4:])
 
     return f"[Context from conversation:\n{history_context}]\n\nCurrent question: {message}"
 
@@ -152,7 +147,6 @@ def build_context_prompt(chunks: list[dict[str, Any]]) -> str:
         text = sanitize_document_content(chunk.get("text", ""))[:2000]
         title = chunk.get("documentTitle") or "Document"
         page = chunk.get("page")
-        doc_id = chunk.get("documentId", "")
 
         header = f"[{i + 1}] {title}"
         if page:
@@ -169,7 +163,7 @@ def extract_citations_from_response(
 ) -> list[ChatCitation]:
     """Extract citation objects from the response."""
     citation_pattern = re.compile(r"\[(\d+)\]")
-    used_nums = set(int(m) for m in citation_pattern.findall(answer))
+    used_nums = {int(m) for m in citation_pattern.findall(answer)}
 
     citations = []
     seen_docs = set()
@@ -287,7 +281,7 @@ async def generate_non_streaming(
         response.raise_for_status()
         body = response.json()
 
-        content = (body.get("choices", [{}])[0].get("message", {}).get("content", ""))
+        content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
         usage = body.get("usage", {})
 
         return content.strip(), usage
@@ -335,9 +329,7 @@ async def run_chat_pipeline(request: ChatRequest) -> ChatResult:
 
     reranked = rerank_chunks(chunks, query)
 
-    relevance_result = await apply_relevance_gate(
-        query, reranked, request.organisation_id
-    )
+    relevance_result = await apply_relevance_gate(query, reranked, request.organisation_id)
 
     if not relevance_result.passed:
         return ChatResult(
@@ -379,10 +371,12 @@ async def run_chat_pipeline(request: ChatRequest) -> ChatResult:
     if not valid and errors:
         logger.warning("Citation verification failed: %s", errors)
         messages.append({"role": "assistant", "content": answer})
-        messages.append({
-            "role": "user",
-            "content": f"Some citations were not properly grounded. Please revise: {errors}"
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": f"Some citations were not properly grounded. Please revise: {errors}",
+            }
+        )
         answer, usage = await generate_non_streaming(messages)
         citations = extract_citations_from_response(answer, supporting_chunks)
 
@@ -419,42 +413,57 @@ async def stream_chat_pipeline(
 
     yield StreamEvent("run.started", {"runId": run_id, "conversationId": request.conversation_id})
 
-    yield StreamEvent("step", {
-        "id": "understanding",
-        "name": "understanding",
-        "status": "started",
-        "label": "Understanding your question",
-    })
+    yield StreamEvent(
+        "step",
+        {
+            "id": "understanding",
+            "name": "understanding",
+            "status": "started",
+            "label": "Understanding your question",
+        },
+    )
 
     guardrail_result = apply_guardrails(request.message, request.organisation_id)
 
-    yield StreamEvent("step", {
-        "id": "understanding",
-        "name": "understanding",
-        "status": "done",
-    })
+    yield StreamEvent(
+        "step",
+        {
+            "id": "understanding",
+            "name": "understanding",
+            "status": "done",
+        },
+    )
 
     if not guardrail_result.passed:
-        yield StreamEvent("decline", {
-            "reason": guardrail_result.decline_type,
-            "message": guardrail_result.decline_message,
-        })
-        yield StreamEvent("run.completed", {
-            "mode": "declined",
-            "usage": {},
-            "latencyMs": int((time.time() - start_time) * 1000),
-        })
+        yield StreamEvent(
+            "decline",
+            {
+                "reason": guardrail_result.decline_type,
+                "message": guardrail_result.decline_message,
+            },
+        )
+        yield StreamEvent(
+            "run.completed",
+            {
+                "mode": "declined",
+                "usage": {},
+                "latencyMs": int((time.time() - start_time) * 1000),
+            },
+        )
         return
 
     query = guardrail_result.sanitized_query or request.message
     query = rewrite_query_with_history(query, request.history)
 
-    yield StreamEvent("step", {
-        "id": "retrieving",
-        "name": "retrieving",
-        "status": "started",
-        "label": "Searching your documents",
-    })
+    yield StreamEvent(
+        "step",
+        {
+            "id": "retrieving",
+            "name": "retrieving",
+            "status": "started",
+            "label": "Searching your documents",
+        },
+    )
 
     chunks = search_chunks(
         request.organisation_id,
@@ -464,69 +473,91 @@ async def stream_chat_pipeline(
         limit=settings.chat_retrieve_top_k,
     )
 
-    yield StreamEvent("step", {
-        "id": "retrieving",
-        "name": "retrieving",
-        "status": "done",
-        "detail": {"chunks": len(chunks)},
-    })
+    yield StreamEvent(
+        "step",
+        {
+            "id": "retrieving",
+            "name": "retrieving",
+            "status": "done",
+            "detail": {"chunks": len(chunks)},
+        },
+    )
 
-    yield StreamEvent("step", {
-        "id": "reranking",
-        "name": "reranking",
-        "status": "started",
-        "label": "Finding most relevant sections",
-    })
+    yield StreamEvent(
+        "step",
+        {
+            "id": "reranking",
+            "name": "reranking",
+            "status": "started",
+            "label": "Finding most relevant sections",
+        },
+    )
 
     reranked = rerank_chunks(chunks, query)
 
-    unique_docs = set(c.get("documentId") for c in reranked if c.get("documentId"))
+    unique_docs = {c.get("documentId") for c in reranked if c.get("documentId")}
     titles = [c.get("documentTitle") or "Document" for c in reranked[:5]]
 
-    yield StreamEvent("step", {
-        "id": "reranking",
-        "name": "reranking",
-        "status": "done",
-        "detail": {"documents": len(unique_docs), "titles": titles[:3]},
-    })
-
-    yield StreamEvent("step", {
-        "id": "checking_coverage",
-        "name": "checking_coverage",
-        "status": "started",
-        "label": "Checking document coverage",
-    })
-
-    relevance_result = await apply_relevance_gate(
-        query, reranked, request.organisation_id
+    yield StreamEvent(
+        "step",
+        {
+            "id": "reranking",
+            "name": "reranking",
+            "status": "done",
+            "detail": {"documents": len(unique_docs), "titles": titles[:3]},
+        },
     )
 
-    yield StreamEvent("step", {
-        "id": "checking_coverage",
-        "name": "checking_coverage",
-        "status": "done",
-    })
+    yield StreamEvent(
+        "step",
+        {
+            "id": "checking_coverage",
+            "name": "checking_coverage",
+            "status": "started",
+            "label": "Checking document coverage",
+        },
+    )
+
+    relevance_result = await apply_relevance_gate(query, reranked, request.organisation_id)
+
+    yield StreamEvent(
+        "step",
+        {
+            "id": "checking_coverage",
+            "name": "checking_coverage",
+            "status": "done",
+        },
+    )
 
     if not relevance_result.passed:
-        yield StreamEvent("decline", {
-            "reason": relevance_result.decline_type,
-            "message": relevance_result.decline_message,
-        })
-        yield StreamEvent("run.completed", {
-            "mode": "declined",
-            "usage": {},
-            "latencyMs": int((time.time() - start_time) * 1000),
-        })
+        yield StreamEvent(
+            "decline",
+            {
+                "reason": relevance_result.decline_type,
+                "message": relevance_result.decline_message,
+            },
+        )
+        yield StreamEvent(
+            "run.completed",
+            {
+                "mode": "declined",
+                "usage": {},
+                "latencyMs": int((time.time() - start_time) * 1000),
+            },
+        )
         return
 
     supporting_chunks = relevance_result.supporting_chunks or reranked
 
-    yield StreamEvent("step", {
-        "id": "generating",
-        "name": "generating",
-        "status": "started",
-        "label": "Generating answer from documents",
-    })
+    yield StreamEvent(
+        "step",
+        {
+            "id": "generating",
+            "name": "generating",
+            "status": "started",
+            "label": "Generating answer from documents",
+        },
+    )
 
     context_prompt = build_context_prompt(supporting_chunks)
 
@@ -544,43 +575,58 @@ async def stream_chat_pipeline(
         full_answer += token
         yield StreamEvent("token", {"text": token})
 
-    yield StreamEvent("step", {
-        "id": "generating",
-        "name": "generating",
-        "status": "done",
-    })
+    yield StreamEvent(
+        "step",
+        {
+            "id": "generating",
+            "name": "generating",
+            "status": "done",
+        },
+    )
 
     banned = check_banned_output(full_answer)
     if banned:
         full_answer = re.sub(r"\bapprove[sd]?\b", "process", full_answer, flags=re.IGNORECASE)
         full_answer = re.sub(r"\breject(ed|s)?\b", "decline", full_answer, flags=re.IGNORECASE)
 
-    yield StreamEvent("step", {
-        "id": "verifying",
-        "name": "verifying",
-        "status": "started",
-        "label": "Verifying citations",
-    })
+    yield StreamEvent(
+        "step",
+        {
+            "id": "verifying",
+            "name": "verifying",
+            "status": "started",
+            "label": "Verifying citations",
+        },
+    )
 
     citations = extract_citations_from_response(full_answer, supporting_chunks)
 
     for citation in citations:
-        yield StreamEvent("citation", {
-            "n": citation.n,
-            "documentId": citation.document_id,
-            "title": citation.title,
-            "page": citation.page,
-            "quote": citation.quote,
-        })
+        yield StreamEvent(
+            "citation",
+            {
+                "n": citation.n,
+                "documentId": citation.document_id,
+                "title": citation.title,
+                "page": citation.page,
+                "quote": citation.quote,
+            },
+        )
 
-    yield StreamEvent("step", {
-        "id": "verifying",
-        "name": "verifying",
-        "status": "done",
-    })
+    yield StreamEvent(
+        "step",
+        {
+            "id": "verifying",
+            "name": "verifying",
+            "status": "done",
+        },
+    )
 
-    yield StreamEvent("run.completed", {
-        "mode": "answered",
-        "usage": {},
-        "latencyMs": int((time.time() - start_time) * 1000),
-    })
+    yield StreamEvent(
+        "run.completed",
+        {
+            "mode": "answered",
+            "usage": {},
+            "latencyMs": int((time.time() - start_time) * 1000),
+        },
+    )

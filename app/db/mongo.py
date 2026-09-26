@@ -30,9 +30,7 @@ def load_job(job_id: str, *, organisation_id: str | None = None) -> dict[str, An
     return get_db().extraction_jobs.find_one(query)
 
 
-def load_project(
-    project_id: str, *, organisation_id: str | None = None
-) -> dict[str, Any] | None:
+def load_project(project_id: str, *, organisation_id: str | None = None) -> dict[str, Any] | None:
     """Load project by ID. Optionally verify org for defense in depth."""
     query: dict[str, Any] = {"projectId": project_id, "deletedAt": None}
     if organisation_id:
@@ -40,9 +38,7 @@ def load_project(
     return get_db().projects.find_one(query)
 
 
-def load_document(
-    document_id: str, *, organisation_id: str | None = None
-) -> dict[str, Any] | None:
+def load_document(document_id: str, *, organisation_id: str | None = None) -> dict[str, Any] | None:
     """Load document by ID. Optionally verify org for defense in depth."""
     query: dict[str, Any] = {"documentId": document_id, "deletedAt": None}
     if organisation_id:
@@ -57,9 +53,7 @@ def load_extraction(
     query: dict[str, Any] = {"documentId": document_id}
     if organisation_id:
         query["organisationId"] = organisation_id
-    return get_db().extractions.find_one(
-        query, sort=[("version", -1), ("createdAt", -1)]
-    )
+    return get_db().extractions.find_one(query, sort=[("version", -1), ("createdAt", -1)])
 
 
 def get_org_config(organisation_id: str) -> dict[str, Any]:

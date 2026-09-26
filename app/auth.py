@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from dataclasses import dataclass
 from typing import Literal
 
@@ -128,9 +127,7 @@ class OptionalJWTBearer(HTTPBearer):
             _log_legacy_warning(request.url.path)
             return None
 
-        credentials: HTTPAuthorizationCredentials | None = await super().__call__(
-            request
-        )
+        credentials: HTTPAuthorizationCredentials | None = await super().__call__(request)
 
         if not credentials:
             raise HTTPException(

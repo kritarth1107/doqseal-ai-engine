@@ -72,23 +72,17 @@ def search_chunks(
         logger.warning("Query embedding failed: %s", exc)
         return []
 
-    visibility_filter = build_visibility_filter(
-        organisation_id, user_id, project_id=project_id
-    )
+    visibility_filter = build_visibility_filter(organisation_id, user_id, project_id=project_id)
 
     filter_dict: dict[str, Any] = {"must": []}
     if visibility_filter.must:
         for cond in visibility_filter.must:
-            filter_dict["must"].append(
-                {"key": cond.key, "match": {"value": cond.match.value}}
-            )
+            filter_dict["must"].append({"key": cond.key, "match": {"value": cond.match.value}})
 
     if visibility_filter.should:
         filter_dict["should"] = []
         for cond in visibility_filter.should:
-            filter_dict["should"].append(
-                {"key": cond.key, "match": {"value": cond.match.value}}
-            )
+            filter_dict["should"].append({"key": cond.key, "match": {"value": cond.match.value}})
 
     try:
         with httpx.Client(timeout=15.0, headers=_qdrant_headers()) as client:
@@ -187,10 +181,7 @@ def get_extraction_fields(
         return []
 
     visible_docs = {
-        d["documentId"]
-        for d in list_visible_documents(
-            organisation_id, user_id=user_id, limit=500
-        )
+        d["documentId"] for d in list_visible_documents(organisation_id, user_id=user_id, limit=500)
     }
 
     results = []
@@ -255,10 +246,9 @@ def list_documents(
         ):
             type_map[ext["documentId"]] = (ext.get("data") or {}).get("document_type")
 
-        docs = [
-            d for d in docs
-            if _matches_type(type_map.get(d["documentId"]), document_type)
-        ][:limit]
+        docs = [d for d in docs if _matches_type(type_map.get(d["documentId"]), document_type)][
+            :limit
+        ]
 
     results = []
     for doc in docs[:limit]:
@@ -321,9 +311,7 @@ def classify_document(*, title: str, filename: str, extra: str, has_medicines: b
     """Return prescription | invoice | note | document. Invoices never count as prescriptions."""
     heading = f"{title} {filename}"
     blob = f"{heading} {extra}"
-    if _INVOICE_RE.search(heading) or (
-        _INVOICE_RE.search(blob) and not _RX_RE.search(heading)
-    ):
+    if _INVOICE_RE.search(heading) or (_INVOICE_RE.search(blob) and not _RX_RE.search(heading)):
         return "invoice"
     if _RX_RE.search(heading) or has_medicines:
         return "prescription"
@@ -413,7 +401,9 @@ def list_document_library(
     }
 
 
-def get_extraction(document_id: str, *, organisation_id: str | None = None) -> dict[str, Any] | None:
+def get_extraction(
+    document_id: str, *, organisation_id: str | None = None
+) -> dict[str, Any] | None:
     """Get extraction for a document."""
     return load_extraction(document_id, organisation_id=organisation_id)
 

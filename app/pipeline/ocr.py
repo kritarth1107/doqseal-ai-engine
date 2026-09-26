@@ -32,11 +32,9 @@ def _get_ocr_engine():
         import easyocr
         import torch
 
-        langs = [
-            lang.strip()
-            for lang in settings.ocr_languages.split(",")
-            if lang.strip()
-        ] or ["en"]
+        langs = [lang.strip() for lang in settings.ocr_languages.split(",") if lang.strip()] or [
+            "en"
+        ]
 
         use_gpu = torch.cuda.is_available()
         logger.info("Initializing EasyOCR (langs=%s, gpu=%s)...", langs, use_gpu)

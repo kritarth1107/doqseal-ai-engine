@@ -1,7 +1,6 @@
 """Security tests for tenant isolation (SEC-T items 3-7)."""
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from tests.conftest import make_jwt
 
@@ -78,11 +77,12 @@ class TestOrganisationMismatch:
 
     def test_body_org_mismatch_returns_403(self, client, org_a_token, mock_qdrant, mock_mongodb):
         """SEC-T-3: Token org A with body org B returns 403."""
-        response = client.post(
-            "/chat",
-            json={"message": "Hello", "organisationId": "org-b-id"},
-            headers={"Authorization": f"Bearer {org_a_token}"},
-        )
+        with patch("app.chat.guardrails.get_org_config", return_value=None):
+            response = client.post(
+                "/chat",
+                json={"message": "Hello", "organisationId": "org-b-id"},
+                headers={"Authorization": f"Bearer {org_a_token}"},
+            )
         assert response.status_code == 403
         assert "mismatch" in response.json()["detail"].lower()
 
@@ -111,11 +111,12 @@ class TestScopeEnforcement:
     def test_chat_scope_required_for_chat(self, client, mock_qdrant, mock_mongodb):
         """Chat endpoint requires chat scope."""
         token = make_jwt("org-a-id", "user-a-id", scope="rag:read")
-        response = client.post(
-            "/chat",
-            json={"message": "Hello", "organisationId": "org-a-id"},
-            headers={"Authorization": f"Bearer {token}"},
-        )
+        with patch("app.chat.guardrails.get_org_config", return_value=None):
+            response = client.post(
+                "/chat",
+                json={"message": "Hello", "organisationId": "org-a-id"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
         assert response.status_code == 403
         assert "scope" in response.json()["detail"].lower()
 
@@ -212,9 +213,7 @@ class TestCrossTenantIsolation:
             with patch("app.chat.tools.is_qdrant_available", return_value=True):
                 chunks_a2 = search_chunks("org-a-id", "private", user_id="user-a2-id")
 
-        private_visible = [
-            c for c in chunks_a2 if c.get("documentId") == "doc-private-a1"
-        ]
+        private_visible = [c for c in chunks_a2 if c.get("documentId") == "doc-private-a1"]
         assert len(private_visible) == 0
 
 

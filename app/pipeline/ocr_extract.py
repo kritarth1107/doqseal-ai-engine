@@ -158,8 +158,7 @@ def _extract_from_hint(ocr_text: str, hint: str) -> dict[str, Any]:
         # Presence / stamp style
         if any(token in lower for token in ("stamp", "seal", "signature", "signed")):
             present = any(
-                token in ocr_text.lower()
-                for token in (lower, "stamp", "seal", "signature")
+                token in ocr_text.lower() for token in (lower, "stamp", "seal", "signature")
             )
             checklist[label] = present
             pointers.append({"label": label, "value": present})
@@ -213,9 +212,7 @@ def _open_ended_extraction(ocr: OcrResult, project: dict[str, Any]) -> dict[str,
                 not in {h["label"].lower() for h in hint_payload["hint_pointers"]}
             ]
             data["pointers"] = merged[:24]
-            data["key_entities"] = {
-                item["label"]: item["value"] for item in data["pointers"][:12]
-            }
+            data["key_entities"] = {item["label"]: item["value"] for item in data["pointers"][:12]}
         if project.get("description"):
             data["project_description"] = project["description"]
     else:

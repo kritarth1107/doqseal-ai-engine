@@ -2,14 +2,13 @@
 
 import os
 import time
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import jwt
 import pytest
 from fastapi.testclient import TestClient
 
-os.environ["AI_ENGINE_JWT_SECRET"] = "test-secret-key-for-testing-only"
+os.environ["AI_ENGINE_JWT_SECRET"] = "test-secret-for-ci"
 os.environ["MONGODB_URI"] = "mongodb://localhost:27017/doqseal_test"
 os.environ["QDRANT_URL"] = "http://localhost:6333"
 os.environ["AZURE_OPENAI_ENDPOINT"] = "https://test.openai.azure.com"
@@ -37,7 +36,7 @@ def make_jwt(
     user_id: str,
     scope: str = "chat",
     *,
-    secret: str = "test-secret-key-for-testing-only",
+    secret: str = "test-secret-for-ci",
     project_id: str | None = None,
     expired: bool = False,
     wrong_issuer: bool = False,

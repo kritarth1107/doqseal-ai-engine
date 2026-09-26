@@ -4,7 +4,7 @@ import threading
 import time
 
 import pika
-from pika.exceptions import AMQPConnectionError, StreamLostError, ConnectionClosedByBroker
+from pika.exceptions import AMQPConnectionError, ConnectionClosedByBroker, StreamLostError
 
 from app.config import settings
 from app.db.mongo import (
@@ -156,9 +156,7 @@ def process_job(job_id: str) -> None:
             logger.exception("Webhook dispatch failed for processing %s", job_id)
 
     try:
-        extraction_payload = run_extraction_pipeline(
-            document, project, organisation_id
-        )
+        extraction_payload = run_extraction_pipeline(document, project, organisation_id)
     except Exception as error:
         mark_job_failed(job_id, document_id, str(error))
         if project_id:

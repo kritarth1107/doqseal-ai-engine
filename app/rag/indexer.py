@@ -12,6 +12,7 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    IsNull,
     MatchValue,
     PointStruct,
     VectorParams,
@@ -78,7 +79,7 @@ def build_visibility_filter(
 
     if not include_deleted:
         must_conditions.append(
-            FieldCondition(key="deletedAt", match=MatchValue(value=None)),
+            FieldCondition(key="deletedAt", match=IsNull(is_null=True)),
         )
 
     if project_id:
@@ -89,16 +90,12 @@ def build_visibility_filter(
     should_conditions = []
     if user_id:
         should_conditions = [
-            FieldCondition(
-                key="sharedWithOrganisation", match=MatchValue(value=True)
-            ),
+            FieldCondition(key="sharedWithOrganisation", match=MatchValue(value=True)),
             FieldCondition(key="uploadedBy", match=MatchValue(value=user_id)),
         ]
     else:
         should_conditions = [
-            FieldCondition(
-                key="sharedWithOrganisation", match=MatchValue(value=True)
-            ),
+            FieldCondition(key="sharedWithOrganisation", match=MatchValue(value=True)),
         ]
 
     return Filter(
@@ -142,7 +139,7 @@ def index_extraction(
     client = _get_client()
 
     points = []
-    for chunk, vector in zip(chunks, vectors):
+    for chunk, vector in zip(chunks, vectors, strict=True):
         payload = {
             "organisationId": organisation_id,
             "documentId": document_id,
@@ -206,12 +203,8 @@ def mark_document_deleted(*, organisation_id: str, document_id: str) -> int:
             collection_name=collection_name,
             scroll_filter=Filter(
                 must=[
-                    FieldCondition(
-                        key="documentId", match=MatchValue(value=document_id)
-                    ),
-                    FieldCondition(
-                        key="organisationId", match=MatchValue(value=organisation_id)
-                    ),
+                    FieldCondition(key="documentId", match=MatchValue(value=document_id)),
+                    FieldCondition(key="organisationId", match=MatchValue(value=organisation_id)),
                 ]
             ),
             limit=100,
@@ -258,12 +251,8 @@ def delete_document_chunks(*, organisation_id: str, document_id: str) -> int:
             collection_name=collection_name,
             scroll_filter=Filter(
                 must=[
-                    FieldCondition(
-                        key="documentId", match=MatchValue(value=document_id)
-                    ),
-                    FieldCondition(
-                        key="organisationId", match=MatchValue(value=organisation_id)
-                    ),
+                    FieldCondition(key="documentId", match=MatchValue(value=document_id)),
+                    FieldCondition(key="organisationId", match=MatchValue(value=organisation_id)),
                 ]
             ),
             limit=100,
@@ -314,12 +303,8 @@ def update_document_visibility(
             collection_name=collection_name,
             scroll_filter=Filter(
                 must=[
-                    FieldCondition(
-                        key="documentId", match=MatchValue(value=document_id)
-                    ),
-                    FieldCondition(
-                        key="organisationId", match=MatchValue(value=organisation_id)
-                    ),
+                    FieldCondition(key="documentId", match=MatchValue(value=document_id)),
+                    FieldCondition(key="organisationId", match=MatchValue(value=organisation_id)),
                 ]
             ),
             limit=100,

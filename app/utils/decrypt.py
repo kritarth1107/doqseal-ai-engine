@@ -16,7 +16,7 @@ def derive_org_key(aes_secret: str, organisation_id: str) -> bytes:
     if not aes_secret or len(aes_secret) < 32:
         raise ValueError("AES_SECRET must be at least 32 characters")
 
-    password = f"{aes_secret}:{organisation_id}".encode("utf-8")
+    password = f"{aes_secret}:{organisation_id}".encode()
     return hashlib.scrypt(password, salt=SCRYPT_SALT, n=16384, r=8, p=1, dklen=DEK_LENGTH)
 
 

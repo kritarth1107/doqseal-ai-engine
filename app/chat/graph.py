@@ -166,7 +166,9 @@ def _thinking_for(message: str, intent: str, library: dict[str, Any]) -> list[di
         steps.append(
             {
                 "title": "Match prescriptions only",
-                "detail": _titles(prescriptions) if prescriptions else "No prescription files in Drive.",
+                "detail": _titles(prescriptions)
+                if prescriptions
+                else "No prescription files in Drive.",
             }
         )
     elif "invoice" in intent:
@@ -210,10 +212,7 @@ def _library_block(library: dict[str, Any] | None) -> str:
     library = library or {}
     items = library.get("items") or []
     if not items:
-        return (
-            "Document library: the user has no visible documents in Drive "
-            "for this scope."
-        )
+        return "Document library: the user has no visible documents in Drive for this scope."
 
     lines = []
     for item in items[:40]:
@@ -269,9 +268,7 @@ def _call_azure_openai_chat(prompt: str) -> str | None:
     endpoint = (settings.azure_openai_endpoint or "").rstrip("/")
     key = settings.azure_openai_api_key or ""
     deployment = (
-        settings.azure_openai_text_deployment
-        or settings.azure_openai_deployment
-        or "gpt-4.1-mini"
+        settings.azure_openai_text_deployment or settings.azure_openai_deployment or "gpt-4.1-mini"
     )
     if not endpoint or not key:
         return None
@@ -295,8 +292,7 @@ def _call_azure_openai_chat(prompt: str) -> str | None:
             response.raise_for_status()
             body = response.json()
             text = (
-                ((body.get("choices") or [{}])[0].get("message") or {}).get("content")
-                or ""
+                ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
             ).strip()
             return text or None
     except Exception as exc:
