@@ -81,6 +81,18 @@ class Settings:
         "EMBEDDING_MODEL", "intfloat/multilingual-e5-base"
     )
 
+    # Bundle classification (internal endpoint, off unless the token is set)
+    ai_engine_service_token: str = os.getenv("AI_ENGINE_SERVICE_TOKEN", "")
+    bundle_classify_max_text_chars: int = int(
+        os.getenv("BUNDLE_CLASSIFY_MAX_TEXT_CHARS", "12000")
+    )
+    bundle_classify_max_field_chars: int = int(
+        os.getenv("BUNDLE_CLASSIFY_MAX_FIELD_CHARS", "8000")
+    )
+    bundle_classify_max_completion_tokens: int = int(
+        os.getenv("BUNDLE_CLASSIFY_MAX_COMPLETION_TOKENS", "600")
+    )
+
     # Chat / vision LLM (Ollama)
     ollama_url: str = os.getenv("OLLAMA_URL", "http://localhost:11434")
     llm_model: str = os.getenv("LLM_MODEL", "qwen3-vl:8b")

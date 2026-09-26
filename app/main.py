@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import os
 
+from app.bundle.router import router as bundle_router
 from app.chat import run_chat
 from app.db.mongo import get_db
 from app.rag.indexer import delete_document_chunks
@@ -11,6 +12,8 @@ app = FastAPI(
     description="Internal extraction engine — not exposed to frontend",
     version="0.1.0",
 )
+
+app.include_router(bundle_router)
 
 
 class ChatRequest(BaseModel):
