@@ -61,11 +61,7 @@ def validate_extraction(
 
     # No project schema → keep open-ended extraction (do not wipe to {})
     if not fields:
-        cleaned = {
-            key: value
-            for key, value in (data or {}).items()
-            if value not in (None, "")
-        }
+        cleaned = {key: value for key, value in (data or {}).items() if value not in (None, "")}
         confidence = _confidence_for_open_data(cleaned, field_confidence or {})
         low_confidence_fields = [
             key for key, score in confidence.items() if score < confidence_threshold
@@ -106,14 +102,20 @@ def validate_extraction(
     for key, value in (data or {}).items():
         if key in coerced:
             continue
-        if key in {"document_type", "summary", "pages", "pointers", "key_entities", "auto_tags", "suggested_title"}:
+        if key in {
+            "document_type",
+            "summary",
+            "pages",
+            "pointers",
+            "key_entities",
+            "auto_tags",
+            "suggested_title",
+        }:
             if value not in (None, "", []):
                 coerced[key] = value
 
     low_confidence_fields = [
-        key
-        for key, score in field_confidence.items()
-        if score < confidence_threshold
+        key for key, score in field_confidence.items() if score < confidence_threshold
     ]
 
     if errors:

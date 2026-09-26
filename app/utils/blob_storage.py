@@ -33,9 +33,7 @@ def _get_container_client():
 
     from azure.storage.blob import BlobServiceClient
 
-    service = BlobServiceClient.from_connection_string(
-        settings.azure_storage_connection_string
-    )
+    service = BlobServiceClient.from_connection_string(settings.azure_storage_connection_string)
     _container_client = service.get_container_client(settings.azure_storage_container)
     return _container_client
 

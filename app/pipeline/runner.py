@@ -86,9 +86,7 @@ def _vision_or_ocr(
     if not pages:
         raise ValueError("No pages could be loaded from document")
 
-    force_ai = bool(project.get("_forceAi")) or bool(
-        (project.get("_userContext") or "").strip()
-    )
+    force_ai = bool(project.get("_forceAi")) or bool((project.get("_userContext") or "").strip())
     use_azure = (
         settings.vlm_provider.lower() == "azure_openai"
         and azure_openai_configured()
@@ -96,9 +94,7 @@ def _vision_or_ocr(
     )
     # Re-runs / handwritten images prefer vision. Digital PDFs should use text path first.
     fast_vision = use_azure and (
-        force_ai
-        or is_image
-        or (settings.skip_ocr_for_vision and is_image)
+        force_ai or is_image or (settings.skip_ocr_for_vision and is_image)
     )
 
     if fast_vision:
@@ -228,8 +224,7 @@ def run_extraction_pipeline(
     mime_l = mime_type.lower()
     is_pdf = "pdf" in mime_l
     is_image = any(
-        tok in mime_l
-        for tok in ("image/", "jpeg", "jpg", "png", "webp", "gif", "bmp", "tiff")
+        tok in mime_l for tok in ("image/", "jpeg", "jpg", "png", "webp", "gif", "bmp", "tiff")
     )
     is_office = is_office_or_text(mime_type, filename)
 

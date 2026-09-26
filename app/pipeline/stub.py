@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 TRF_STUB = {
     "patient_name": "Mrs Afsana Ambir Pinjari",
     "age": 36,
@@ -33,7 +32,7 @@ INSURANCE_STUB = {
 
 
 def _confidence_for_fields(data: dict[str, Any]) -> dict[str, float]:
-    return {key: 0.9 for key in data.keys()}
+    return dict.fromkeys(data.keys(), 0.9)
 
 
 def _field_stub_value(field: dict[str, Any]) -> Any:

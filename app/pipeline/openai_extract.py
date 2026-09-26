@@ -233,9 +233,7 @@ def _mode(project: dict[str, Any]) -> str:
 
 
 def _guidance(project: dict[str, Any]) -> str:
-    user_context = _clip(
-        str(project.get("_userContext") or "").strip(), USER_CONTEXT_MAX_CHARS
-    )
+    user_context = _clip(str(project.get("_userContext") or "").strip(), USER_CONTEXT_MAX_CHARS)
     if not user_context:
         return ""
     return f"USER FIX (priority): {user_context}\n"
@@ -261,7 +259,7 @@ def _build_vision_prompt(project: dict[str, Any]) -> str:
             "Extract structured data from this document image.\n"
             "Follow the EXTRACTION CONTEXT below exactly for sections, field names, "
             "lists, null handling, abbreviation expansion, and any required summary.\n"
-            "Use PLAIN string/number values — NEVER {\"value\":...,\"low_confidence\":...} wrappers.\n"
+            'Use PLAIN string/number values — NEVER {"value":...,"low_confidence":...} wrappers.\n'
             "Spell brand and product names letter-by-letter exactly as printed "
             "(e.g. DoqSeal, not dogeseal).\n"
             "suggested_title must be a SHORT label (3–10 words), not a paragraph.\n"
@@ -311,7 +309,7 @@ def _build_text_prompt(project: dict[str, Any], *, source_label: str) -> str:
             f"Extract structured data from {source_label} text.\n"
             "Follow the EXTRACTION CONTEXT below exactly for sections, field names, "
             "lists, null handling, and any required summary.\n"
-            "Use PLAIN string/number values — NEVER {\"value\":...,\"low_confidence\":...} wrappers.\n"
+            'Use PLAIN string/number values — NEVER {"value":...,"low_confidence":...} wrappers.\n'
             "Spell brand and product names letter-by-letter exactly as printed "
             "(e.g. DoqSeal, not dogeseal).\n"
             "suggested_title must be a SHORT label (3–10 words), not a paragraph.\n"
@@ -381,10 +379,7 @@ def _deep_unwrap(value: Any, path: str, conf_map: dict[str, float]) -> Any:
     if conf is not None:
         conf_map[path] = conf
     if isinstance(plain, list):
-        return [
-            _deep_unwrap(item, f"{path}[{i}]", conf_map)
-            for i, item in enumerate(plain)
-        ]
+        return [_deep_unwrap(item, f"{path}[{i}]", conf_map) for i, item in enumerate(plain)]
     if isinstance(plain, dict):
         out: dict[str, Any] = {}
         for key, child in plain.items():
@@ -487,9 +482,7 @@ def _finalize_payload(parsed: dict[str, Any], *, strategy: str) -> dict[str, Any
         if isinstance(patient, dict) and isinstance(patient.get("name"), str):
             unwrapped["suggested_title"] = f"{patient['name']} — Prescription"
         elif unwrapped.get("document_type"):
-            unwrapped["suggested_title"] = str(unwrapped["document_type"]).replace(
-                "_", " "
-            ).title()
+            unwrapped["suggested_title"] = str(unwrapped["document_type"]).replace("_", " ").title()
 
     low_paths = unwrapped.pop("low_confidence_fields", None)
     if isinstance(low_paths, list):
@@ -535,10 +528,7 @@ def _chat_completions(
 
     endpoint = settings.azure_openai_endpoint.rstrip("/")
     api_version = settings.azure_openai_api_version
-    url = (
-        f"{endpoint}/openai/deployments/{deployment}/chat/completions"
-        f"?api-version={api_version}"
-    )
+    url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
     payload = {
         "messages": messages,
         "max_completion_tokens": max_tokens,
@@ -565,8 +555,7 @@ def _chat_completions(
         )
 
     content = (
-        (((body.get("choices") or [{}])[0].get("message") or {}).get("content"))
-        or ""
+        (((body.get("choices") or [{}])[0].get("message") or {}).get("content")) or ""
     ).strip()
     parsed = _parse_json_response(content)
     if not parsed:
@@ -630,9 +619,8 @@ def extract_with_azure_openai(
 
     mode = _mode(project)
     # Honor VISION_DETAIL=low for normal demos; only bump on explicit reprocess / user context
-    force_detail = (
-        bool(project.get("_forceAi"))
-        or bool((project.get("_userContext") or "").strip())
+    force_detail = bool(project.get("_forceAi")) or bool(
+        (project.get("_userContext") or "").strip()
     )
     detail = "high" if force_detail else (settings.vision_detail or "low")
     max_side = settings.vision_max_side_high if force_detail else settings.vision_max_side
@@ -654,9 +642,7 @@ def extract_with_azure_openai(
                 "image_url": {
                     "url": (
                         "data:image/jpeg;base64,"
-                        + _pil_to_b64_jpeg(
-                            page.image, max_side=max_side, quality=quality
-                        )
+                        + _pil_to_b64_jpeg(page.image, max_side=max_side, quality=quality)
                     ),
                     "detail": detail,
                 },
@@ -665,8 +651,7 @@ def extract_with_azure_openai(
 
     deployment = settings.azure_openai_deployment
     logger.info(
-        "Azure OpenAI vision extract deployment=%s detail=%s pages=%d/%d "
-        "mode=%s max_tokens=%d",
+        "Azure OpenAI vision extract deployment=%s detail=%s pages=%d/%d mode=%s max_tokens=%d",
         deployment,
         detail,
         len(vision_pages),
@@ -690,10 +675,7 @@ def extract_text_with_azure_openai(
 ) -> dict[str, Any]:
     """Structure plain text via cheaper text deployment (gpt-4.1-mini)."""
     mode = _mode(project)
-    deployment = (
-        settings.azure_openai_text_deployment
-        or settings.azure_openai_deployment
-    )
+    deployment = settings.azure_openai_text_deployment or settings.azure_openai_deployment
     prompt = _build_text_prompt(project, source_label=source_label)
     chunks = _chunk_text(_clip(document_text or "", settings.text_max_chars))
     if not chunks:
@@ -701,8 +683,7 @@ def extract_text_with_azure_openai(
 
     max_tokens = max(settings.text_max_completion_tokens, 2500)
     logger.info(
-        "Azure OpenAI text extract deployment=%s chunks=%d total_chars=%d "
-        "mode=%s max_tokens=%d",
+        "Azure OpenAI text extract deployment=%s chunks=%d total_chars=%d mode=%s max_tokens=%d",
         deployment,
         len(chunks),
         sum(len(c) for c in chunks),
@@ -736,17 +717,14 @@ def extract_text_with_azure_openai(
         ordered: dict[int, dict[str, Any]] = {}
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [
-                pool.submit(_extract_chunk, index, chunk)
-                for index, chunk in enumerate(chunks)
+                pool.submit(_extract_chunk, index, chunk) for index, chunk in enumerate(chunks)
             ]
             for fut in as_completed(futures):
                 index, partial = fut.result()
                 ordered[index] = partial
         partials = [ordered[i] for i in range(len(chunks))]
 
-    parsed = _merge_partial_extractions(
-        partials, deployment=deployment, source_label=source_label
-    )
+    parsed = _merge_partial_extractions(partials, deployment=deployment, source_label=source_label)
     return _finalize_payload(
         parsed,
         strategy=f"azure-openai-text:{deployment}",

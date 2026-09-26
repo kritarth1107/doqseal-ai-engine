@@ -37,9 +37,7 @@ def coerce_project_webhooks(project: dict[str, Any] | None) -> list[dict[str, An
             if not url or not _is_http_url(url):
                 continue
             events = [
-                e
-                for e in (item.get("events") or [])
-                if isinstance(e, str) and e in WEBHOOK_EVENTS
+                e for e in (item.get("events") or []) if isinstance(e, str) and e in WEBHOOK_EVENTS
             ]
             if not events:
                 events = ["document.processed"]

@@ -4,7 +4,7 @@ import threading
 import time
 
 import pika
-from pika.exceptions import AMQPConnectionError, StreamLostError, ConnectionClosedByBroker
+from pika.exceptions import AMQPConnectionError, ConnectionClosedByBroker, StreamLostError
 
 from app.config import settings
 from app.db.mongo import (
@@ -25,6 +25,32 @@ logger = logging.getLogger("doqseal.worker")
 
 RECONNECT_BASE_SEC = 2
 RECONNECT_MAX_SEC = 60
+
+
+def _scrub_pii(text: str, max_len: int = 100) -> str:
+    """Scrub potential PII from text before logging.
+
+    Removes patterns that look like:
+    - Aadhaar numbers (12 digits)
+    - PAN numbers (XXXXX9999X pattern)
+    - Phone numbers (10+ digits)
+    - Email addresses
+    """
+    import re
+
+    if not text:
+        return ""
+
+    scrubbed = text[:max_len]
+    scrubbed = re.sub(r"\b\d{12}\b", "[AADHAAR]", scrubbed)
+    scrubbed = re.sub(r"\b[A-Z]{5}\d{4}[A-Z]\b", "[PAN]", scrubbed)
+    scrubbed = re.sub(r"\b\d{10,}\b", "[PHONE]", scrubbed)
+    scrubbed = re.sub(r"\b[\w.-]+@[\w.-]+\.\w+\b", "[EMAIL]", scrubbed)
+
+    if len(text) > max_len:
+        scrubbed += "..."
+
+    return scrubbed
 
 
 def _index_rag_async(**kwargs) -> None:
@@ -109,9 +135,10 @@ def process_job(job_id: str) -> None:
         force_ai,
     )
     if user_context:
-        logger.info("User context for %s: %s", job_id, user_context[:400])
+        logger.info("User context for %s: [%d chars, scrubbed]", job_id, len(user_context))
+        logger.debug("User context preview: %s", _scrub_pii(user_context, 100))
     elif hint:
-        logger.info("Extraction context for %s: %s", project_id, hint[:240])
+        logger.info("Extraction hint for %s: [%d chars]", project_id, len(hint))
 
     if project_id:
         try:
@@ -129,9 +156,7 @@ def process_job(job_id: str) -> None:
             logger.exception("Webhook dispatch failed for processing %s", job_id)
 
     try:
-        extraction_payload = run_extraction_pipeline(
-            document, project, organisation_id
-        )
+        extraction_payload = run_extraction_pipeline(document, project, organisation_id)
     except Exception as error:
         mark_job_failed(job_id, document_id, str(error))
         if project_id:

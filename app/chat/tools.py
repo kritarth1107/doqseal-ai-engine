@@ -1,4 +1,4 @@
-"""Chat tools — Qdrant retrieval and MongoDB document helpers."""
+"""Chat tools — Qdrant retrieval and MongoDB document helpers with tenant isolation."""
 
 from __future__ import annotations
 
@@ -9,15 +9,16 @@ from typing import Any
 import httpx
 
 from app.config import settings
-from app.db.mongo import get_db
+from app.db.mongo import (
+    aggregate_extraction_field,
+    get_db,
+    list_visible_documents,
+    load_extraction,
+)
 from app.rag.embedder import embed_query
+from app.rag.indexer import _collection_name, build_visibility_filter
 
 logger = logging.getLogger("doqseal.chat.tools")
-
-
-def _collection_name(organisation_id: str) -> str:
-    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", organisation_id)
-    return f"org_{safe_id}"
 
 
 def _qdrant_headers() -> dict[str, str]:
@@ -42,15 +43,19 @@ def _collection_exists(client: httpx.Client, organisation_id: str) -> bool:
     return response.status_code == 200
 
 
-def search_documents(
+def search_chunks(
     organisation_id: str,
     query: str,
     *,
-    project_id: str | None = None,
     user_id: str | None = None,
-    limit: int = 5,
+    project_id: str | None = None,
+    limit: int = 25,
 ) -> list[dict[str, Any]]:
-    """Retrieve relevant chunks from Qdrant via vector search."""
+    """Search document chunks with mandatory tenant isolation filters.
+
+    Returns chunks with scores for reranking. Never returns deleted or
+    invisible documents.
+    """
     if not query.strip():
         return []
 
@@ -67,28 +72,31 @@ def search_documents(
         logger.warning("Query embedding failed: %s", exc)
         return []
 
+    visibility_filter = build_visibility_filter(organisation_id, user_id, project_id=project_id)
+
+    filter_dict: dict[str, Any] = {"must": []}
+    if visibility_filter.must:
+        for cond in visibility_filter.must:
+            filter_dict["must"].append({"key": cond.key, "match": {"value": cond.match.value}})
+
+    if visibility_filter.should:
+        filter_dict["should"] = []
+        for cond in visibility_filter.should:
+            filter_dict["should"].append({"key": cond.key, "match": {"value": cond.match.value}})
+
     try:
         with httpx.Client(timeout=15.0, headers=_qdrant_headers()) as client:
             if not _collection_exists(client, organisation_id):
                 logger.info("Qdrant collection %s not found", collection)
                 return []
 
-            query_filter: dict[str, Any] | None = None
-            if project_id:
-                query_filter = {
-                    "must": [{"key": "projectId", "match": {"value": project_id}}]
-                }
-
-            # Over-fetch then apply visibility in Python (handles legacy payloads)
-            fetch_limit = max(limit * 4, 20) if user_id else limit
-
             response = client.post(
                 f"{base_url}/collections/{collection}/points/search",
                 json={
                     "vector": vector,
-                    "limit": fetch_limit,
+                    "limit": limit,
                     "with_payload": True,
-                    "filter": query_filter,
+                    "filter": filter_dict,
                 },
             )
             response.raise_for_status()
@@ -104,25 +112,185 @@ def search_documents(
         if not text:
             continue
 
-        # Visibility: private chunks only for the uploader; missing flag = shared (legacy)
-        if user_id:
-            shared = payload.get("sharedWithOrganisation")
-            uploaded_by = payload.get("uploadedBy")
-            if shared is False and uploaded_by and uploaded_by != user_id:
-                continue
+        if payload.get("deletedAt"):
+            continue
 
         chunks.append(
             {
                 "documentId": payload.get("documentId"),
                 "projectId": payload.get("projectId"),
-                "snippet": str(text)[:500],
-                "score": point.get("score"),
+                "text": str(text),
+                "page": payload.get("page"),
+                "score": point.get("score", 0),
+                "documentTitle": payload.get("documentTitle"),
+                "documentType": payload.get("documentType"),
+                "source": payload.get("source"),
+                "field": payload.get("field"),
+                "fieldValue": payload.get("fieldValue"),
             }
         )
-        if len(chunks) >= limit:
-            break
 
     return chunks
+
+
+def search_documents(
+    organisation_id: str,
+    query: str,
+    *,
+    project_id: str | None = None,
+    user_id: str | None = None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Legacy search interface - wraps search_chunks for backward compatibility."""
+    chunks = search_chunks(
+        organisation_id,
+        query,
+        user_id=user_id,
+        project_id=project_id,
+        limit=max(limit * 4, 20),
+    )
+
+    results: list[dict[str, Any]] = []
+    for chunk in chunks:
+        results.append(
+            {
+                "documentId": chunk.get("documentId"),
+                "projectId": chunk.get("projectId"),
+                "snippet": str(chunk.get("text", ""))[:500],
+                "score": chunk.get("score"),
+            }
+        )
+        if len(results) >= limit:
+            break
+
+    return results
+
+
+def get_extraction_fields(
+    organisation_id: str,
+    document_ids: list[str],
+    fields: list[str] | None = None,
+    *,
+    user_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Get extraction fields for specified documents.
+
+    Returns only documents visible to the user in the organisation.
+    """
+    if not document_ids:
+        return []
+
+    visible_docs = {
+        d["documentId"] for d in list_visible_documents(organisation_id, user_id=user_id, limit=500)
+    }
+
+    results = []
+    for doc_id in document_ids:
+        if doc_id not in visible_docs:
+            continue
+
+        extraction = load_extraction(doc_id, organisation_id=organisation_id)
+        if not extraction:
+            continue
+
+        data = extraction.get("data", {})
+        if fields:
+            filtered_data = {}
+            for field in fields:
+                parts = field.split(".")
+                value = data
+                for part in parts:
+                    if isinstance(value, dict):
+                        value = value.get(part)
+                    else:
+                        value = None
+                        break
+                if value is not None:
+                    filtered_data[field] = value
+            data = filtered_data
+
+        results.append(
+            {
+                "documentId": doc_id,
+                "fields": data,
+                "confidence": extraction.get("fieldConfidence", {}),
+            }
+        )
+
+    return results
+
+
+def list_documents(
+    organisation_id: str,
+    *,
+    user_id: str | None = None,
+    project_id: str | None = None,
+    document_type: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """List documents visible to the user with optional type filtering."""
+    docs = list_visible_documents(
+        organisation_id,
+        user_id=user_id,
+        project_id=project_id,
+        limit=limit * 2 if document_type else limit,
+    )
+
+    if document_type:
+        db = get_db()
+        doc_ids = [d["documentId"] for d in docs]
+        type_map = {}
+        for ext in db.extractions.find(
+            {"documentId": {"$in": doc_ids}, "organisationId": organisation_id},
+            {"documentId": 1, "data.document_type": 1},
+        ):
+            type_map[ext["documentId"]] = (ext.get("data") or {}).get("document_type")
+
+        docs = [d for d in docs if _matches_type(type_map.get(d["documentId"]), document_type)][
+            :limit
+        ]
+
+    results = []
+    for doc in docs[:limit]:
+        results.append(
+            {
+                "documentId": doc.get("documentId"),
+                "projectId": doc.get("projectId"),
+                "title": doc.get("displayTitle") or doc.get("originalFilename") or "Untitled",
+                "filename": doc.get("originalFilename"),
+                "status": doc.get("status"),
+            }
+        )
+
+    return results
+
+
+def _matches_type(doc_type: str | None, filter_type: str) -> bool:
+    """Check if document type matches filter (case-insensitive, partial)."""
+    if not doc_type:
+        return False
+    return filter_type.lower() in doc_type.lower()
+
+
+def aggregate_field(
+    organisation_id: str,
+    field_path: str,
+    operation: str,
+    *,
+    user_id: str | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    """Aggregate over extraction fields (count, sum, avg, min, max, distinct).
+
+    Always scoped to organisation and visible documents.
+    """
+    return aggregate_extraction_field(
+        organisation_id,
+        field_path,
+        operation,
+        user_id=user_id,
+        project_id=project_id,
+    )
 
 
 _RX_RE = re.compile(
@@ -139,23 +307,11 @@ _NOTE_RE = re.compile(
 )
 
 
-def _visible_to_user(doc: dict[str, Any], user_id: str | None) -> bool:
-    if not user_id:
-        return True
-    shared = doc.get("sharedWithOrganisation")
-    uploaded_by = doc.get("uploadedBy")
-    if shared is False and uploaded_by and uploaded_by != user_id:
-        return False
-    return True
-
-
 def classify_document(*, title: str, filename: str, extra: str, has_medicines: bool) -> str:
     """Return prescription | invoice | note | document. Invoices never count as prescriptions."""
     heading = f"{title} {filename}"
     blob = f"{heading} {extra}"
-    if _INVOICE_RE.search(heading) or (
-        _INVOICE_RE.search(blob) and not _RX_RE.search(heading)
-    ):
+    if _INVOICE_RE.search(heading) or (_INVOICE_RE.search(blob) and not _RX_RE.search(heading)):
         return "invoice"
     if _RX_RE.search(heading) or has_medicines:
         return "prescription"
@@ -174,38 +330,20 @@ def list_document_library(
     limit: int = 80,
 ) -> dict[str, Any]:
     """Catalogue of Drive/project documents the user can see, for count questions."""
-    db = get_db()
-    query: dict[str, Any] = {
-        "organisationId": organisation_id,
-        "$or": [{"deletedAt": None}, {"deletedAt": {"$exists": False}}],
-    }
-    if project_id:
-        query["projectId"] = project_id
-
-    cursor = (
-        db.documents.find(
-            query,
-            {
-                "_id": 0,
-                "documentId": 1,
-                "projectId": 1,
-                "originalFilename": 1,
-                "displayTitle": 1,
-                "status": 1,
-                "uploadedBy": 1,
-                "sharedWithOrganisation": 1,
-            },
-        )
-        .sort("createdAt", -1)
-        .limit(max(limit * 3, 120))
+    docs = list_visible_documents(
+        organisation_id,
+        user_id=user_id,
+        project_id=project_id,
+        limit=limit,
     )
 
-    docs = [doc for doc in cursor if _visible_to_user(doc, user_id)][:limit]
+    db = get_db()
     ids = [d["documentId"] for d in docs if d.get("documentId")]
     extraction_bits: dict[str, dict[str, Any]] = {}
+
     if ids:
         for row in db.extractions.find(
-            {"documentId": {"$in": ids}},
+            {"documentId": {"$in": ids}, "organisationId": organisation_id},
             {
                 "_id": 0,
                 "documentId": 1,
@@ -229,6 +367,7 @@ def list_document_library(
 
     items: list[dict[str, Any]] = []
     counts = {"prescription": 0, "invoice": 0, "note": 0, "document": 0}
+
     for doc in docs:
         title = (doc.get("displayTitle") or doc.get("originalFilename") or "Untitled").strip()
         filename = (doc.get("originalFilename") or "").strip()
@@ -262,13 +401,11 @@ def list_document_library(
     }
 
 
-def get_extraction(document_id: str) -> dict[str, Any] | None:
-    db = get_db()
-    extraction = db.extractions.find_one({"documentId": document_id})
-    if not extraction:
-        return None
-    extraction.pop("_id", None)
-    return extraction
+def get_extraction(
+    document_id: str, *, organisation_id: str | None = None
+) -> dict[str, Any] | None:
+    """Get extraction for a document."""
+    return load_extraction(document_id, organisation_id=organisation_id)
 
 
 def list_project_documents(
@@ -277,13 +414,9 @@ def list_project_documents(
     *,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    db = get_db()
-    cursor = (
-        db.documents.find(
-            {"organisationId": organisation_id, "projectId": project_id},
-            {"_id": 0, "documentId": 1, "originalFilename": 1, "createdAt": 1},
-        )
-        .sort("createdAt", -1)
-        .limit(limit)
+    """List documents in a project."""
+    return list_documents(
+        organisation_id,
+        project_id=project_id,
+        limit=limit,
     )
-    return list(cursor)

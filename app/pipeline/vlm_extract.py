@@ -62,12 +62,8 @@ def _build_schema_prompt(
     hint = (project.get("extractionHint") or "").strip()
     description = (project.get("description") or "").strip()
     in_project = bool(project.get("projectId"))
-    project_name = project.get("name") or (
-        "Organisation Drive" if not in_project else "Project"
-    )
-    trf_mode = _looks_like_trf(ocr.full_text or "", hint) or _is_handwritten_form(
-        project, ocr
-    )
+    project_name = project.get("name") or ("Organisation Drive" if not in_project else "Project")
+    trf_mode = _looks_like_trf(ocr.full_text or "", hint) or _is_handwritten_form(project, ocr)
 
     if fields:
         field_lines = []
@@ -75,7 +71,7 @@ def _build_schema_prompt(
             req = "required" if field.get("required") else "optional"
             field_lines.append(
                 f'- "{field["key"]}" ({field.get("type", "string")}, {req}): '
-                f'{field.get("label", field["key"])}'
+                f"{field.get('label', field['key'])}"
             )
         schema_block = "\n".join(field_lines)
         schema_block += """
@@ -215,9 +211,7 @@ def _parse_json_response(text: str) -> dict[str, Any]:
             continue
 
     preview = (text or "")[:800].replace("\n", " ")
-    raise ValueError(
-        f"Model response was not valid JSON ({last_error}); preview={preview!r}"
-    )
+    raise ValueError(f"Model response was not valid JSON ({last_error}); preview={preview!r}")
 
 
 def _prepare_vision_image(image: Image.Image, max_side: int = 2048) -> Image.Image:
@@ -293,9 +287,7 @@ def _call_ollama_vision(prompt: str, image_b64_list: list[str]) -> str:
             break
         except Exception as err:
             last_error = err
-            logger.warning(
-                "Ollama vision attempt %d/3 failed: %s", attempt, err
-            )
+            logger.warning("Ollama vision attempt %d/3 failed: %s", attempt, err)
             if attempt < 3:
                 time.sleep(5 * attempt)
     else:
@@ -364,10 +356,7 @@ def warmup_vlm() -> None:
         with httpx.Client(timeout=20.0) as client:
             response = client.get(url)
             response.raise_for_status()
-            names = {
-                m.get("name") or m.get("model")
-                for m in (response.json().get("models") or [])
-            }
+            names = {m.get("name") or m.get("model") for m in (response.json().get("models") or [])}
         logger.info(
             "Ollama reachable; gemma/vision model configured=%s present=%s",
             settings.vlm_model,
@@ -424,9 +413,7 @@ Rules:
         "tests_requested",
         "lab_name",
     }
-    extra_fields = [
-        f for f in fields if f.get("key") and f["key"] not in core_keys
-    ]
+    extra_fields = [f for f in fields if f.get("key") and f["key"] not in core_keys]
     if extra_fields or (not parsed.get("patient_name") and handwritten):
         use_ocr_hint = not handwritten
         prompt = _build_schema_prompt(project, ocr, use_ocr_hint=use_ocr_hint)
