@@ -55,7 +55,7 @@ class ClassificationError(Exception):
         self.retryable = retryable
 
 
-_cache: "OrderedDict[tuple[str, str], dict[str, Any]]" = OrderedDict()
+_cache: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
 _cache_lock = threading.Lock()
 
 

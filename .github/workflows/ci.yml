@@ -18,4 +18,6 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python -m compileall app
       - run: pip install -r requirements-dev.txt
+      # TODO: widen to all of app/ once the older extraction modules are ruff-clean.
+      - run: ruff check app/main.py app/config.py app/security.py app/chat app/bundle app/rag/indexer.py tests
       - run: python -m pytest -q tests

@@ -1,17 +1,17 @@
 """Internal endpoint: classify one document into a bundle template slot.
 
-Only the backend calls this. It is disabled unless AI_ENGINE_SERVICE_TOKEN is
-set, and every request must present that token. The organisation is checked
-against the document record before any model call.
+Only the backend calls this. It needs a service JWT with scope
+"bundle:classify" (see app/security.py) and is disabled (503) until the shared
+secret is configured. The organisation comes from the verified token and is
+checked against the document record before any model call.
 """
 
 from __future__ import annotations
 
-import hmac
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.bundle.classify import (
@@ -20,7 +20,7 @@ from app.bundle.classify import (
     ClassificationError,
     classify_document,
 )
-from app.config import settings
+from app.security import check_org, require_claims
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +66,6 @@ class ClassifyResponse(BaseModel):
     cached: bool = False
 
 
-def _check_token(provided: str | None) -> None:
-    expected = (settings.ai_engine_service_token or "").strip()
-    if not expected:
-        raise HTTPException(status_code=503, detail="bundle classification is not enabled")
-    if not provided or not hmac.compare_digest(provided.strip(), expected):
-        raise HTTPException(status_code=401, detail="invalid service token")
-
-
 def document_belongs_to_org(organisation_id: str, document_id: str) -> bool:
     from app.db.mongo import get_db
 
@@ -85,15 +77,9 @@ def document_belongs_to_org(organisation_id: str, document_id: str) -> bool:
 
 
 @router.post("/classify", response_model=ClassifyResponse)
-def classify(
-    body: ClassifyRequest,
-    x_service_token: str | None = Header(default=None),
-    x_organisation_id: str | None = Header(default=None),
-):
-    _check_token(x_service_token)
-
-    if not x_organisation_id or x_organisation_id.strip() != body.organisationId:
-        raise HTTPException(status_code=400, detail="organisation mismatch")
+def classify(request: Request, body: ClassifyRequest):
+    claims = require_claims(request, scope="bundle:classify")
+    check_org(claims, body.organisationId)
 
     keys = [s.key for s in body.slots]
     if len(set(keys)) != len(keys):
@@ -103,7 +89,7 @@ def classify(
         owned = document_belongs_to_org(body.organisationId, body.documentId)
     except Exception:
         logger.exception("bundle classify: document lookup failed")
-        raise HTTPException(status_code=503, detail="document lookup unavailable")
+        raise HTTPException(status_code=503, detail="document lookup unavailable") from None
     if not owned:
         raise HTTPException(status_code=404, detail="document not found")
 
@@ -127,7 +113,7 @@ def classify(
         raise HTTPException(
             status_code=status,
             detail={"message": "classification failed", "retryable": exc.retryable},
-        )
+        ) from exc
 
     return ClassifyResponse(
         requestId=body.requestId,

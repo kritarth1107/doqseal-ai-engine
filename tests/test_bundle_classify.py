@@ -7,8 +7,8 @@ from fastapi.testclient import TestClient
 from app.bundle import classify as classify_mod
 from app.bundle import router as router_mod
 from app.config import settings
+from tests.chat_fakes import SECRET, make_token
 
-TOKEN = "test-service-token"
 ORG_A = "org-a"
 ORG_B = "org-b"
 
@@ -48,7 +48,7 @@ def model_calls(monkeypatch):
 
 @pytest.fixture()
 def client(monkeypatch):
-    monkeypatch.setattr(settings, "ai_engine_service_token", TOKEN)
+    monkeypatch.setattr(settings, "service_jwt_secret", SECRET)
     monkeypatch.setattr(
         router_mod,
         "document_belongs_to_org",
@@ -77,8 +77,9 @@ def body(org=ORG_A, doc="doc-a1", request_id="req-1", **extra):
     return payload
 
 
-def headers(org=ORG_A, token=TOKEN):
-    return {"X-Service-Token": token, "X-Organisation-Id": org}
+def headers(org=ORG_A, token=None, scope="bundle:classify"):
+    token = token or make_token(org, scope=scope)
+    return {"Authorization": f"Bearer {token}"}
 
 
 def test_happy_path_returns_slot_confidence_reasons_and_key_fields(client, model_calls):
@@ -102,7 +103,7 @@ def test_happy_path_returns_slot_confidence_reasons_and_key_fields(client, model
 
 
 def test_disabled_without_configured_token(client, model_calls, monkeypatch):
-    monkeypatch.setattr(settings, "ai_engine_service_token", "")
+    monkeypatch.setattr(settings, "service_jwt_secret", "")
     res = client.post("/bundle/classify", json=body(), headers=headers())
     assert res.status_code == 503
     assert model_calls == []
@@ -110,13 +111,17 @@ def test_disabled_without_configured_token(client, model_calls, monkeypatch):
 
 def test_wrong_or_missing_token_is_refused(client, model_calls):
     assert client.post("/bundle/classify", json=body(), headers=headers(token="nope")).status_code == 401
-    assert client.post("/bundle/classify", json=body(), headers={"X-Organisation-Id": ORG_A}).status_code == 401
+    bad_secret = make_token(ORG_A, scope="bundle:classify", secret="another-secret-0123456789abcdef")
+    assert client.post("/bundle/classify", json=body(), headers=headers(token=bad_secret)).status_code == 401
+    assert client.post("/bundle/classify", json=body()).status_code == 401
+    # A chat credential cannot be used to classify.
+    assert client.post("/bundle/classify", json=body(), headers=headers(scope="chat")).status_code == 403
     assert model_calls == []
 
 
-def test_org_header_must_match_body(client, model_calls):
+def test_token_org_must_match_body(client, model_calls):
     res = client.post("/bundle/classify", json=body(org=ORG_A), headers=headers(org=ORG_B))
-    assert res.status_code == 400
+    assert res.status_code == 403
     assert model_calls == []
 
 

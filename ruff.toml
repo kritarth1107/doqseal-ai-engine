@@ -1,0 +1,12 @@
+# Lint configuration. CI lints the modules listed in .github/workflows/ci.yml;
+# older extraction modules are not yet ruff-clean (TODO: widen the scope as they are touched).
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["B008", "UP038"]  # FastAPI Depends()/Query() defaults; UP038 is deprecated upstream
+
+[lint.per-file-ignores]
+"app/chat/engine.py" = ["E501"]  # prompt text is kept one rule per line
+"tests/*" = ["E501"]

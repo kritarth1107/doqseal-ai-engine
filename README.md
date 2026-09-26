@@ -27,4 +27,4 @@ Health API: `./run-health.sh` → http://localhost:3031/health
 - [ARCHITECTURE.md](./ARCHITECTURE.md)
 - [docs/PIPELINE.md](./docs/PIPELINE.md)
 - [docs/RAG.md](./docs/RAG.md) (planned)
-- [docs/LANGGRAPH.md](./docs/LANGGRAPH.md) (planned)
+- [docs/CHAT.md](./docs/CHAT.md)

@@ -81,8 +81,14 @@ class Settings:
         "EMBEDDING_MODEL", "intfloat/multilingual-e5-base"
     )
 
-    # Bundle classification (internal endpoint, off unless the token is set)
-    ai_engine_service_token: str = os.getenv("AI_ENGINE_SERVICE_TOKEN", "")
+    # Service auth: HS256 JWTs minted by doqseal-backend. AI_ENGINE_SERVICE_TOKEN
+    # is accepted as an alias so one secret covers chat, RAG and bundles.
+    service_jwt_secret: str = (
+        os.getenv("AI_ENGINE_JWT_SECRET", "").strip()
+        or os.getenv("AI_ENGINE_SERVICE_TOKEN", "").strip()
+    )
+
+    # Bundle classification (internal endpoint, off unless the secret is set)
     bundle_classify_max_text_chars: int = int(
         os.getenv("BUNDLE_CLASSIFY_MAX_TEXT_CHARS", "12000")
     )
@@ -96,6 +102,21 @@ class Settings:
     # Chat / vision LLM (Ollama)
     ollama_url: str = os.getenv("OLLAMA_URL", "http://localhost:11434")
     llm_model: str = os.getenv("LLM_MODEL", "qwen3-vl:8b")
+
+    # Grounded document chat
+    chat_retrieve_top_k: int = int(os.getenv("CHAT_RETRIEVE_TOP_K", "40"))
+    chat_context_chunks: int = int(os.getenv("CHAT_CONTEXT_CHUNKS", "12"))
+    chat_context_chars: int = int(os.getenv("CHAT_CONTEXT_CHARS", "36000"))
+    chat_min_score: float = float(os.getenv("CHAT_MIN_SCORE", "0.0"))
+    chat_history_turns: int = int(os.getenv("CHAT_HISTORY_TURNS", "10"))
+    # Caps include reasoning tokens on reasoning deployments, so keep them generous.
+    chat_answer_max_tokens: int = int(os.getenv("CHAT_ANSWER_MAX_TOKENS", "4000"))
+    chat_judge_max_tokens: int = int(os.getenv("CHAT_JUDGE_MAX_TOKENS", "2000"))
+    # Empty = the deployment's default (the extraction calls never set one either).
+    chat_temperature: str = os.getenv("CHAT_TEMPERATURE", "")
+    chat_deployment: str = os.getenv("CHAT_DEPLOYMENT", "")
+    chat_timeout_seconds: float = float(os.getenv("CHAT_TIMEOUT_SECONDS", "90"))
+    chat_heartbeat_seconds: float = float(os.getenv("CHAT_HEARTBEAT_SECONDS", "15"))
 
 
 settings = Settings()

@@ -88,7 +88,7 @@ def index_extraction(
                 "text": chunk["text"],
             },
         )
-        for chunk, vector in zip(chunks, vectors)
+        for chunk, vector in zip(chunks, vectors, strict=False)
     ]
 
     client.upsert(collection_name=collection_name, points=points)
@@ -116,7 +116,10 @@ def delete_document_chunks(*, organisation_id: str, document_id: str) -> int:
         records, next_offset = client.scroll(
             collection_name=collection_name,
             scroll_filter={
-                "must": [{"key": "documentId", "match": {"value": document_id}}]
+                "must": [
+                    {"key": "organisationId", "match": {"value": organisation_id}},
+                    {"key": "documentId", "match": {"value": document_id}},
+                ]
             },
             limit=100,
             offset=offset,
