@@ -114,8 +114,52 @@ def allowed_documents(
     return out
 
 
+_NOT_READY = frozenset({"uploaded", "queued", "processing", "failed"})
+_KIND_TEXT = {
+    "prescription": re.compile(r"\bprescriptions?\b|\brx\b", re.IGNORECASE),
+    "invoice": re.compile(r"\binvoices?\b|\bbills?\b", re.IGNORECASE),
+    "note": re.compile(r"\bnotes?\b", re.IGNORECASE),
+}
+
+
+def _extraction_types(organisation_id: str, document_ids: list[str]) -> dict[str, str]:
+    if not document_ids:
+        return {}
+    coll = getattr(_get_db(), "extractions", None)
+    if coll is None:
+        return {}
+    found: dict[str, str] = {}
+    rows = coll.find(
+        {"organisationId": organisation_id, "documentId": {"$in": document_ids}},
+        {"_id": 0, "documentId": 1, "organisationId": 1, "data": 1},
+    )
+    for row in rows:
+        if row.get("organisationId") != organisation_id:
+            continue
+        data = row.get("data") if isinstance(row.get("data"), dict) else {}
+        dtype = data.get("document_type") or row.get("documentType")
+        if dtype and row.get("documentId"):
+            found[str(row["documentId"])] = str(dtype)
+    return found
+
+
+def _matches_kind(row: dict[str, Any], extracted: str | None, kind: str) -> bool:
+    pattern = _KIND_TEXT.get(kind)
+    if pattern is None:
+        return True
+    blob = " ".join(
+        str(part or "")
+        for part in (row.get("originalFilename"), row.get("displayTitle"), extracted)
+    )
+    return bool(pattern.search(blob))
+
+
 def list_library(
-    organisation_id: str, user_id: str | None, project_id: str | None, limit: int = 100
+    organisation_id: str,
+    user_id: str | None,
+    project_id: str | None,
+    limit: int = 100,
+    kind: str | None = None,
 ) -> list[dict[str, Any]]:
     rows = (
         _get_db()
@@ -127,6 +171,7 @@ def list_library(
                 "organisationId": 1,
                 "displayTitle": 1,
                 "originalFilename": 1,
+                "projectId": 1,
                 "status": 1,
                 "createdAt": 1,
             },
@@ -134,7 +179,20 @@ def list_library(
         .sort("createdAt", -1)
         .limit(limit)
     )
-    return [r for r in rows if r.get("organisationId") == organisation_id]
+    visible = [
+        r
+        for r in rows
+        if r.get("organisationId") == organisation_id and r.get("status") not in _NOT_READY
+    ]
+    if kind and kind != "document":
+        types = _extraction_types(organisation_id, [r["documentId"] for r in visible])
+        visible = [r for r in visible if _matches_kind(r, types.get(r["documentId"]), kind)]
+        for row in visible:
+            row["kind"] = types.get(row["documentId"]) or kind
+    else:
+        for row in visible:
+            row["kind"] = "document"
+    return visible
 
 
 def document_title(row: dict[str, Any]) -> str:

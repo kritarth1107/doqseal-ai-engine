@@ -196,26 +196,42 @@ def _error(code: str, message: str) -> Event:
     return Event("error", {"code": code, "message": message})
 
 
-async def _library_answer(inp: ChatInput, started: float) -> AsyncIterator[Event]:
+def _cell(value: str) -> str:
+    return (value or "—").replace("|", "/").replace("\n", " ")[:120]
+
+
+async def _library_answer(inp: ChatInput, started: float, kind: str) -> AsyncIterator[Event]:
     import asyncio
 
     yield _step("retrieving", "started")
-    rows = await asyncio.to_thread(retrieval.list_library, inp.organisation_id, inp.user_id, inp.project_id, 100)
+    rows = await asyncio.to_thread(
+        retrieval.list_library, inp.organisation_id, inp.user_id, inp.project_id, 500, kind
+    )
     yield _step("retrieving", "done", {"documents": len(rows)})
     if not rows:
         for event in _decline("not_covered", started, _Usage()):
             yield event
         return
-    shown = rows[:25]
+    shown = rows[:40]
+    noun = kind if kind != "document" else "document"
     lines = [
-        f"You have {len(rows)}{'+' if len(rows) >= 100 else ''} document"
-        f"{'s' if len(rows) != 1 else ''} available to you. Most recent first:",
+        f"You have {len(rows)}{'+' if len(rows) >= 500 else ''} {noun}"
+        f"{'s' if len(rows) != 1 else ''}.",
         "",
+        "| Document | Type | File |",
+        "| --- | --- | --- |",
     ]
-    for n, row in enumerate(shown, start=1):
-        lines.append(f"{n}. {retrieval.document_title(row)} [{n}]")
+    for row in shown:
+        lines.append(
+            "| {title} | {kind} | {filename} |".format(
+                title=_cell(retrieval.document_title(row)),
+                kind=_cell(str(row.get("kind") or noun)),
+                filename=_cell(str(row.get("originalFilename") or "—")),
+            )
+        )
     if len(rows) > len(shown):
-        lines.append(f"\n…and {len(rows) - len(shown)} more.")
+        lines.append("")
+        lines.append(f"…and {len(rows) - len(shown)} more.")
     yield _step("generating", "started")
     yield Event("token", {"text": guard.clean_wording("\n".join(lines))})
     yield _step("generating", "done")
@@ -228,6 +244,9 @@ async def _library_answer(inp: ChatInput, started: float) -> AsyncIterator[Event
                 "title": retrieval.document_title(row),
                 "page": None,
                 "quote": retrieval.document_title(row),
+                "filename": row.get("originalFilename"),
+                "kind": row.get("kind") or noun,
+                "projectId": row.get("projectId"),
             },
         )
     yield Event("run.completed", {"mode": "answered", "usage": _Usage().as_dict(), "latencyMs": _ms(started)})
@@ -246,9 +265,10 @@ async def run_chat_events(inp: ChatInput) -> AsyncIterator[Event]:
         for event in _decline("small_talk", started, usage):
             yield event
         return
-    if guard.is_library_question(message):
+    kind = guard.inventory_kind(message)
+    if kind:
         yield _step("understanding", "done")
-        async for event in _library_answer(inp, started):
+        async for event in _library_answer(inp, started, kind):
             yield event
         return
     query = await _standalone_query(inp, usage)

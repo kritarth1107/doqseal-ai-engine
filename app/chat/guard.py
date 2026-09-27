@@ -38,20 +38,40 @@ _SMALL_TALK_RE = re.compile(r"^\s*(" + "|".join(_SMALL_TALK) + r")\s*[!.?,]*\s*(
 
 _LIBRARY_WORDS = frozenset(
     "document documents doc docs file files upload uploads uploaded many count number total "
-    "library drive have has we our my there list show which what did do i me all are is".split()
+    "library drive have has we our my there list show which what did do i me all are is "
+    "prescription prescriptions invoice invoices bill bills note notes".split()
 )
-_LIBRARY_RE = re.compile(r"\b(how many|list|show|which|what)\b.*\b(documents?|files?|uploads?|docs?)\b", re.IGNORECASE)
+_INVENTORY_RE = re.compile(
+    r"\b(how many|list|show|which|what)\b.*\b(prescriptions?|invoices?|bills?|notes?|documents?|files?|uploads?|docs?)\b",
+    re.IGNORECASE,
+)
+_KIND_PATTERNS = (
+    ("prescription", re.compile(r"\bprescriptions?\b", re.IGNORECASE)),
+    ("invoice", re.compile(r"\binvoices?\b|\bbills?\b", re.IGNORECASE)),
+    ("note", re.compile(r"\bnotes?\b", re.IGNORECASE)),
+    ("document", re.compile(r"\b(?:documents?|files?|uploads?|docs?)\b", re.IGNORECASE)),
+)
 
 
 def is_small_talk(message: str) -> bool:
     return bool(_SMALL_TALK_RE.match(message.strip()))
 
 
+def inventory_kind(message: str) -> str | None:
+    """Deterministic library inventory: prescriptions, invoices, notes, or all documents."""
+    if not _INVENTORY_RE.search(message):
+        return None
+    if not all(t in _LIBRARY_WORDS for t in query_terms(message)):
+        return None
+    for kind, pattern in _KIND_PATTERNS:
+        if pattern.search(message):
+            return kind
+    return None
+
+
 def is_library_question(message: str) -> bool:
     """Questions about the library itself, e.g. "how many documents do we have?"."""
-    if not _LIBRARY_RE.search(message):
-        return False
-    return all(t in _LIBRARY_WORDS for t in query_terms(message))
+    return inventory_kind(message) == "document"
 
 
 _TAG_RE = re.compile(r"<\s*/?\s*(document|system|assistant|user|developer|instructions?)\b[^>]*>", re.I)

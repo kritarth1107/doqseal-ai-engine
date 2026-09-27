@@ -353,6 +353,63 @@ class TestGuardrails:
         cited = {d["documentId"] for t, d in events if t == "citation"}
         assert cited == {"trf-1", "tips-1"}
         assert "del-1" not in cited and "b-1" not in cited and "priv-a2" not in cited
+        assert "| Document | Type | File |" in text
+
+    def test_prescription_inventory_counts_only_matching_ready_files(self, env):
+        env.db.documents.rows.extend(
+            [
+                {
+                    "documentId": "rx-1",
+                    "organisationId": "org-a",
+                    "displayTitle": "Amoxicillin",
+                    "originalFilename": "amoxicillin.pdf",
+                    "uploadedBy": "user-a1",
+                    "sharedWithOrganisation": True,
+                    "deletedAt": None,
+                    "createdAt": 9,
+                    "status": "completed",
+                },
+                {
+                    "documentId": "inv-1",
+                    "organisationId": "org-a",
+                    "displayTitle": "March bill",
+                    "originalFilename": "invoice-march.pdf",
+                    "uploadedBy": "user-a1",
+                    "sharedWithOrganisation": True,
+                    "deletedAt": None,
+                    "createdAt": 8,
+                    "status": "completed",
+                },
+                {
+                    "documentId": "queued-rx",
+                    "organisationId": "org-a",
+                    "displayTitle": "Waiting prescription",
+                    "originalFilename": "prescription-queued.pdf",
+                    "uploadedBy": "user-a1",
+                    "sharedWithOrganisation": True,
+                    "deletedAt": None,
+                    "createdAt": 7,
+                    "status": "queued",
+                },
+            ]
+        )
+        from tests.chat_fakes import FakeCollection
+
+        env.db.extractions = FakeCollection(
+            [
+                {
+                    "documentId": "rx-1",
+                    "organisationId": "org-a",
+                    "data": {"document_type": "prescription"},
+                }
+            ]
+        )
+        events = stream(env, "how many prescriptions do I have?")
+        text = "".join(d["text"] for t, d in events if t == "token")
+        assert "1 prescription" in text
+        cited = {d["documentId"] for t, d in events if t == "citation"}
+        assert cited == {"rx-1"}
+        assert "invoice" not in text.lower()
 
 
 # --- streaming -----------------------------------------------------------------
