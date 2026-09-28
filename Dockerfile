@@ -17,10 +17,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-# CPU torch first to keep image smaller than CUDA builds
+# App deps first. sentence-transformers pulls a PyPI torchvision that does not
+# match a CPU torch, and import then dies with
+# "operator torchvision::nms does not exist" (document search never embeds).
+# Force a matched CPU pair last so nothing can replace it.
 RUN pip install --upgrade pip \
-    && pip install torch --index-url https://download.pytorch.org/whl/cpu \
-    && pip install -r requirements.txt
+    && grep -vE '^(torch|torchvision)([=<>!]|$)' requirements.txt > /tmp/requirements.notorch.txt \
+    && pip install -r /tmp/requirements.notorch.txt \
+    && pip install --force-reinstall --no-deps \
+        "torch==2.6.0" "torchvision==0.21.0" \
+        --index-url https://download.pytorch.org/whl/cpu \
+    && rm /tmp/requirements.notorch.txt \
+    && python -c "from torchvision.ops import nms; import sentence_transformers; print('torchvision nms ok')"
 
 COPY app ./app
 COPY scripts/docker-entrypoint.sh /docker-entrypoint.sh

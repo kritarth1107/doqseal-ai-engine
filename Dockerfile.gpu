@@ -27,12 +27,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-# Install CUDA torch first; omit torch from requirements to avoid CPU overwrite
+# Matched CUDA pair last. An unpinned torchvision cannot register nms.
 RUN pip3 install --upgrade pip \
-    && pip3 install torch --index-url https://download.pytorch.org/whl/cu121 \
-    && grep -vE '^torch([=<>]|$)' requirements.txt > /tmp/requirements.notorch.txt \
+    && grep -vE '^(torch|torchvision)([=<>!]|$)' requirements.txt > /tmp/requirements.notorch.txt \
     && pip3 install -r /tmp/requirements.notorch.txt \
-    && rm /tmp/requirements.notorch.txt
+    && pip3 install --force-reinstall --no-deps \
+        "torch==2.5.1" "torchvision==0.20.1" \
+        --index-url https://download.pytorch.org/whl/cu121 \
+    && rm /tmp/requirements.notorch.txt \
+    && python -c "from torchvision.ops import nms; import sentence_transformers; print('torchvision nms ok')"
 
 COPY app ./app
 COPY scripts/docker-entrypoint.sh /docker-entrypoint.sh
