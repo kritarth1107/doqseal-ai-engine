@@ -355,6 +355,44 @@ class TestGuardrails:
         assert "del-1" not in cited and "b-1" not in cited and "priv-a2" not in cited
         assert "| Document | Type | File |" in text
 
+    def test_recent_document_summary_uses_the_drive_library(self, env):
+        from tests.chat_fakes import FakeCollection
+
+        env.db.documents.rows.append(
+            {
+                "documentId": "drive-new",
+                "organisationId": "org-a",
+                "displayTitle": "Lab report",
+                "originalFilename": "lab-report.pdf",
+                "projectId": None,
+                "uploadedBy": "user-a1",
+                "sharedWithOrganisation": True,
+                "deletedAt": None,
+                "createdAt": 10,
+                "status": "completed",
+            }
+        )
+        env.db.extractions = FakeCollection(
+            [
+                {
+                    "documentId": "drive-new",
+                    "organisationId": "org-a",
+                    "data": {"summary": "HbA1c result for Ravi Kumar."},
+                }
+            ]
+        )
+        events = stream(env, "summarize the most recent documents in this organisation")
+        text = "".join(d["text"] for t, d in events if t == "token")
+        assert "most recent documents" in text
+        assert "Lab report" in text
+        assert "HbA1c result for Ravi Kumar." in text
+        assert "Anita" not in text
+        cited = {d["documentId"] for t, d in events if t == "citation"}
+        assert "drive-new" in cited
+        assert "priv-a2" not in cited and "del-1" not in cited
+        assert env.qdrant.calls == []
+        assert dict(events)["run.completed"]["mode"] == "answered"
+
     def test_prescription_inventory_counts_only_matching_ready_files(self, env):
         env.db.documents.rows.extend(
             [

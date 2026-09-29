@@ -122,7 +122,7 @@ _KIND_TEXT = {
 }
 
 
-def _extraction_types(organisation_id: str, document_ids: list[str]) -> dict[str, str]:
+def _extraction_field(organisation_id: str, document_ids: list[str], field: str) -> dict[str, str]:
     if not document_ids:
         return {}
     coll = getattr(_get_db(), "extractions", None)
@@ -131,16 +131,20 @@ def _extraction_types(organisation_id: str, document_ids: list[str]) -> dict[str
     found: dict[str, str] = {}
     rows = coll.find(
         {"organisationId": organisation_id, "documentId": {"$in": document_ids}},
-        {"_id": 0, "documentId": 1, "organisationId": 1, "data": 1},
+        {"_id": 0, "documentId": 1, "organisationId": 1, "data": 1, "documentType": 1},
     )
     for row in rows:
         if row.get("organisationId") != organisation_id:
             continue
         data = row.get("data") if isinstance(row.get("data"), dict) else {}
-        dtype = data.get("document_type") or row.get("documentType")
-        if dtype and row.get("documentId"):
-            found[str(row["documentId"])] = str(dtype)
+        value = data.get(field) or (row.get("documentType") if field == "document_type" else None)
+        if value and row.get("documentId"):
+            found[str(row["documentId"])] = str(value)
     return found
+
+
+def _extraction_types(organisation_id: str, document_ids: list[str]) -> dict[str, str]:
+    return _extraction_field(organisation_id, document_ids, "document_type")
 
 
 def _matches_kind(row: dict[str, Any], extracted: str | None, kind: str) -> bool:
@@ -193,6 +197,46 @@ def list_library(
         for row in visible:
             row["kind"] = "document"
     return visible
+
+
+def recent_overviews(
+    organisation_id: str,
+    user_id: str | None,
+    project_id: str | None,
+    limit: int = 8,
+) -> dict[str, Any]:
+    """Newest visible files, including Drive uploads that have no project.
+
+    Ready files include their extraction summary. Files still processing are
+    counted so chat does not claim the organisation has nothing.
+    """
+    rows = (
+        _get_db()
+        .documents.find(
+            visibility_query(organisation_id, user_id, project_id),
+            {
+                "_id": 0,
+                "documentId": 1,
+                "organisationId": 1,
+                "displayTitle": 1,
+                "originalFilename": 1,
+                "projectId": 1,
+                "status": 1,
+                "createdAt": 1,
+            },
+        )
+        .sort("createdAt", -1)
+        .limit(40)
+    )
+    visible = [r for r in rows if r.get("organisationId") == organisation_id]
+    pending = [r for r in visible if r.get("status") in _NOT_READY]
+    ready = [r for r in visible if r.get("status") not in _NOT_READY]
+    shown = ready[:limit]
+    summaries = _extraction_field(organisation_id, [r["documentId"] for r in shown], "summary")
+    for row in shown:
+        row["kind"] = "document"
+        row["summary"] = summaries.get(row["documentId"], "")
+    return {"documents": shown, "pending": len(pending), "totalReady": len(ready)}
 
 
 def document_title(row: dict[str, Any]) -> str:

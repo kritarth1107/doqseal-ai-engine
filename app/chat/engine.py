@@ -252,6 +252,77 @@ async def _library_answer(inp: ChatInput, started: float, kind: str) -> AsyncIte
     yield Event("run.completed", {"mode": "answered", "usage": _Usage().as_dict(), "latencyMs": _ms(started)})
 
 
+async def _library_overview(inp: ChatInput, started: float) -> AsyncIterator[Event]:
+    import asyncio
+
+    yield _step("retrieving", "started")
+    overview = await asyncio.to_thread(
+        retrieval.recent_overviews, inp.organisation_id, inp.user_id, inp.project_id, 8
+    )
+    rows = overview["documents"]
+    yield _step("retrieving", "done", {"documents": len(rows)})
+    if not rows and not overview["pending"]:
+        for event in _decline("not_covered", started, _Usage()):
+            yield event
+        return
+    if not rows:
+        pending = overview["pending"]
+        text = (
+            f"{pending} file{'s' if pending != 1 else ''} in Drive "
+            f"{'are' if pending != 1 else 'is'} still processing, so I can't summarize "
+            "them yet. Ask again once extraction finishes."
+        )
+        yield _step("generating", "started")
+        yield Event("token", {"text": text})
+        yield _step("generating", "done")
+        yield Event("run.completed", {"mode": "answered", "usage": _Usage().as_dict(), "latencyMs": _ms(started)})
+        return
+
+    lines = [
+        "Here are the most recent documents in this organisation.",
+        "",
+        "| Document | File | Summary |",
+        "| --- | --- | --- |",
+    ]
+    for row in rows:
+        lines.append(
+            "| {title} | {filename} | {summary} |".format(
+                title=_cell(retrieval.document_title(row)),
+                filename=_cell(str(row.get("originalFilename") or "—")),
+                summary=_cell(str(row.get("summary") or "No summary stored yet.")),
+            )
+        )
+    extra = overview["totalReady"] - len(rows)
+    if extra > 0:
+        lines.extend(["", f"…and {extra} more ready documents."])
+    if overview["pending"]:
+        lines.extend(
+            [
+                "",
+                f"{overview['pending']} other file{'s' if overview['pending'] != 1 else ''} in Drive "
+                "are still processing and are not summarized yet.",
+            ]
+        )
+    yield _step("generating", "started")
+    yield Event("token", {"text": guard.clean_wording("\n".join(lines))})
+    yield _step("generating", "done")
+    for n, row in enumerate(rows, start=1):
+        yield Event(
+            "citation",
+            {
+                "n": n,
+                "documentId": row["documentId"],
+                "title": retrieval.document_title(row),
+                "page": None,
+                "quote": retrieval.document_title(row),
+                "filename": row.get("originalFilename"),
+                "kind": "document",
+                "projectId": row.get("projectId"),
+            },
+        )
+    yield Event("run.completed", {"mode": "answered", "usage": _Usage().as_dict(), "latencyMs": _ms(started)})
+
+
 async def run_chat_events(inp: ChatInput) -> AsyncIterator[Event]:
     started = time.monotonic()
     usage = _Usage()
@@ -269,6 +340,11 @@ async def run_chat_events(inp: ChatInput) -> AsyncIterator[Event]:
     if kind:
         yield _step("understanding", "done")
         async for event in _library_answer(inp, started, kind):
+            yield event
+        return
+    if guard.is_library_overview(message):
+        yield _step("understanding", "done")
+        async for event in _library_overview(inp, started):
             yield event
         return
     query = await _standalone_query(inp, usage)

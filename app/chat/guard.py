@@ -74,6 +74,24 @@ def is_library_question(message: str) -> bool:
     return inventory_kind(message) == "document"
 
 
+_OVERVIEW_RE = re.compile(
+    r"\b(?:summar(?:y|ise|ize|ies)|overview|recap)\b.{0,80}\b(?:recent|latest|newest|all|our|my|organisation|organization|drive|library)\b.{0,48}\b(?:documents?|files?|uploads?)\b"
+    r"|\b(?:most recent|latest|newest)\b.{0,48}\b(?:documents?|files?|uploads?)\b"
+    r"|\b(?:documents?|files?)\b.{0,48}\bin (?:this|the) (?:organisation|organization)\b"
+    r"|\b(?:documents?|files?)\b.{0,24}\bin (?:the )?drive\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def is_library_overview(message: str) -> bool:
+    """Questions about the set of files, such as summarizing the newest documents.
+
+    These are answered from the same library Drive lists. Semantic search looks
+    for a passage about the question and then declines when none exists.
+    """
+    return bool(_OVERVIEW_RE.search(message or ""))
+
+
 _TAG_RE = re.compile(r"<\s*/?\s*(document|system|assistant|user|developer|instructions?)\b[^>]*>", re.I)
 _ROLE_RE = re.compile(r"^\s*(system|assistant|developer)\s*:", re.I | re.M)
 
