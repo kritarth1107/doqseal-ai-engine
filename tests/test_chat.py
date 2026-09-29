@@ -421,11 +421,17 @@ class TestGuardrails:
                 }
             ]
         )
+        env.model.answer = (
+            "The first file is a discharge note for Ravi Kumar after a fever visit [1]. "
+            "It is a medical record, not just a filename."
+        )
         events = stream(env, "what are this documents ?")
         text = "".join(d["text"] for t, d in events if t == "token")
-        assert "Here is what these documents are." in text
         assert "You have" not in text
-        assert "Discharge note for Ravi Kumar" in text
+        assert "discharge note for Ravi Kumar" in text
+        prompt = env.model.stream_calls[0][-1]["content"]
+        assert "Discharge note for Ravi Kumar after a fever visit." in prompt
+        assert "images.jpg" in prompt
         cited = {d["documentId"]: d for t, d in events if t == "citation"}
         assert cited["img-1"]["kind"] == "medical record"
         assert env.qdrant.calls == []

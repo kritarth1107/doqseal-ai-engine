@@ -14,6 +14,7 @@ An `error` event ends the stream early.
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -252,6 +253,80 @@ async def _library_answer(inp: ChatInput, started: float, kind: str) -> AsyncIte
     yield Event("run.completed", {"mode": "answered", "usage": _Usage().as_dict(), "latencyMs": _ms(started)})
 
 
+def _document_blurb(index: int, row: dict[str, Any]) -> str:
+    title = retrieval.document_title(row)
+    filename = str(row.get("originalFilename") or "untitled file")
+    kind = str(row.get("kind") or "document").replace("_", " ")
+    notes = str(row.get("notes") or row.get("summary") or "").strip()
+    body = notes or "The scan did not save what is inside this file."
+    return f"[{index}] {title} ({filename}), type {kind}.\n{body}"
+
+
+async def _explain_documents(
+    inp: ChatInput, started: float, rows: list[dict[str, Any]], overview: dict[str, Any]
+) -> AsyncIterator[Event]:
+    """Answer 'what are these documents?' from the saved scan, not a file count."""
+    notes = "\n\n".join(_document_blurb(index, row) for index, row in enumerate(rows, start=1))
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You explain an organisation's uploaded documents. Use only the notes. "
+                "Write plain sentences about what each file is: the kind of record, who it is about, "
+                "and the important facts in the notes. "
+                "Do not reply with only a count such as 'You have 2 documents'. "
+                "After each file, cite its number in square brackets, for example [1]. "
+                "If a file has no saved contents, say that you can see the filename but not what is inside."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Question: {inp.message.strip()}\n\nNotes:\n{notes}",
+        },
+    ]
+    yield _step("generating", "started")
+    parts: list[str] = []
+    try:
+        async for item in llm.stream_chat(messages, max_tokens=settings.chat_answer_max_tokens):
+            if "usage" in item:
+                continue
+            piece = item.get("text") or ""
+            if piece:
+                parts.append(piece)
+                yield Event("token", {"text": piece})
+    except llm.LLMError as exc:
+        logger.warning("document explanation failed: %s", exc)
+        parts = []
+    text = "".join(parts).strip()
+    if not text or re.search(r"^you have \d+ documents?\.?$", text, re.I):
+        fallback = ["Here is what is in these files.", ""]
+        fallback.extend(_document_blurb(index, row) for index, row in enumerate(rows, start=1))
+        if overview.get("pending"):
+            fallback.append("")
+            fallback.append(
+                f"{overview['pending']} other file{'s' if overview['pending'] != 1 else ''} "
+                "are still processing."
+            )
+        text = "\n".join(fallback)
+        yield Event("token", {"text": text})
+    yield _step("generating", "done")
+    for n, row in enumerate(rows, start=1):
+        yield Event(
+            "citation",
+            {
+                "n": n,
+                "documentId": row["documentId"],
+                "title": retrieval.document_title(row),
+                "page": None,
+                "quote": str(row.get("summary") or retrieval.document_title(row))[:200],
+                "filename": row.get("originalFilename"),
+                "kind": row.get("kind") or "document",
+                "projectId": row.get("projectId"),
+            },
+        )
+    yield Event("run.completed", {"mode": "answered", "usage": _Usage().as_dict(), "latencyMs": _ms(started)})
+
+
 async def _library_overview(inp: ChatInput, started: float) -> AsyncIterator[Event]:
     import asyncio
 
@@ -279,10 +354,12 @@ async def _library_overview(inp: ChatInput, started: float) -> AsyncIterator[Eve
         return
 
     explaining = guard.asks_what_documents_are(inp.message)
+    if explaining:
+        async for event in _explain_documents(inp, started, rows, overview):
+            yield event
+        return
     lines = [
-        "Here is what these documents are."
-        if explaining
-        else "Here are the most recent documents in this organisation.",
+        "Here are the most recent documents in this organisation.",
         "",
     ]
     for index, row in enumerate(rows, start=1):

@@ -12,6 +12,7 @@ Every search is scoped three ways:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -147,6 +148,67 @@ def _extraction_types(organisation_id: str, document_ids: list[str]) -> dict[str
     return _extraction_field(organisation_id, document_ids, "document_type")
 
 
+_NOTE_SKIP = frozenset(
+    {
+        "summary",
+        "document_type",
+        "suggested_title",
+        "confidence",
+        "low_confidence",
+        "confidence_score",
+        "pages",
+        "pointers",
+    }
+)
+
+
+def _note_value(value: Any) -> str:
+    if value in (None, "", [], {}):
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > 180:
+        text = text[:177] + "..."
+    return text
+
+
+def _extraction_notes(organisation_id: str, document_ids: list[str]) -> dict[str, str]:
+    """Short reading notes from the saved extraction, for explaining a file."""
+    if not document_ids:
+        return {}
+    coll = getattr(_get_db(), "extractions", None)
+    if coll is None:
+        return {}
+    found: dict[str, str] = {}
+    rows = coll.find(
+        {"organisationId": organisation_id, "documentId": {"$in": document_ids}},
+        {"_id": 0, "documentId": 1, "organisationId": 1, "data": 1},
+    )
+    for row in rows:
+        if row.get("organisationId") != organisation_id or not row.get("documentId"):
+            continue
+        data = row.get("data") if isinstance(row.get("data"), dict) else {}
+        parts: list[str] = []
+        summary = _note_value(data.get("summary"))
+        if summary:
+            parts.append(summary)
+        for key, value in data.items():
+            if key in _NOTE_SKIP:
+                continue
+            text = _note_value(value)
+            if not text:
+                continue
+            parts.append(f"{str(key).replace('_', ' ')}: {text}")
+            if len(parts) >= 8:
+                break
+        if parts:
+            found[str(row["documentId"])] = "\n".join(parts)[:900]
+    return found
+
+
 def _matches_kind(row: dict[str, Any], extracted: str | None, kind: str) -> bool:
     pattern = _KIND_TEXT.get(kind)
     if pattern is None:
@@ -235,9 +297,11 @@ def recent_overviews(
     ids = [r["documentId"] for r in shown]
     summaries = _extraction_field(organisation_id, ids, "summary")
     types = _extraction_types(organisation_id, ids)
+    notes = _extraction_notes(organisation_id, ids)
     for row in shown:
         row["kind"] = types.get(row["documentId"]) or "document"
         row["summary"] = summaries.get(row["documentId"], "")
+        row["notes"] = notes.get(row["documentId"], "")
     return {"documents": shown, "pending": len(pending), "totalReady": len(ready)}
 
 
