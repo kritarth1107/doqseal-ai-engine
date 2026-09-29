@@ -393,6 +393,43 @@ class TestGuardrails:
         assert env.qdrant.calls == []
         assert dict(events)["run.completed"]["mode"] == "answered"
 
+    def test_what_are_these_documents_describes_content(self, env):
+        from tests.chat_fakes import FakeCollection
+
+        env.db.documents.rows.append(
+            {
+                "documentId": "img-1",
+                "organisationId": "org-a",
+                "displayTitle": "Patient Medical Record",
+                "originalFilename": "images.jpg",
+                "uploadedBy": "user-a1",
+                "sharedWithOrganisation": True,
+                "deletedAt": None,
+                "createdAt": 11,
+                "status": "completed",
+            }
+        )
+        env.db.extractions = FakeCollection(
+            [
+                {
+                    "documentId": "img-1",
+                    "organisationId": "org-a",
+                    "data": {
+                        "document_type": "medical record",
+                        "summary": "Discharge note for Ravi Kumar after a fever visit.",
+                    },
+                }
+            ]
+        )
+        events = stream(env, "what are this documents ?")
+        text = "".join(d["text"] for t, d in events if t == "token")
+        assert "Here is what these documents are." in text
+        assert "You have" not in text
+        assert "Discharge note for Ravi Kumar" in text
+        cited = {d["documentId"]: d for t, d in events if t == "citation"}
+        assert cited["img-1"]["kind"] == "medical record"
+        assert env.qdrant.calls == []
+
     def test_prescription_inventory_counts_only_matching_ready_files(self, env):
         env.db.documents.rows.extend(
             [

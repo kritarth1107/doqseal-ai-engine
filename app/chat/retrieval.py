@@ -232,9 +232,11 @@ def recent_overviews(
     pending = [r for r in visible if r.get("status") in _NOT_READY]
     ready = [r for r in visible if r.get("status") not in _NOT_READY]
     shown = ready[:limit]
-    summaries = _extraction_field(organisation_id, [r["documentId"] for r in shown], "summary")
+    ids = [r["documentId"] for r in shown]
+    summaries = _extraction_field(organisation_id, ids, "summary")
+    types = _extraction_types(organisation_id, ids)
     for row in shown:
-        row["kind"] = "document"
+        row["kind"] = types.get(row["documentId"]) or "document"
         row["summary"] = summaries.get(row["documentId"], "")
     return {"documents": shown, "pending": len(pending), "totalReady": len(ready)}
 

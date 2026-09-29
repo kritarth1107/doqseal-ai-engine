@@ -57,8 +57,21 @@ def is_small_talk(message: str) -> bool:
     return bool(_SMALL_TALK_RE.match(message.strip()))
 
 
+_WHAT_ARE_RE = re.compile(
+    r"\bwhat\s+(?:are|is|'re)\b.{0,48}\b(?:these|this|those|the|my|our)?\s*(?:documents?|files?|uploads?|docs?)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def asks_what_documents_are(message: str) -> bool:
+    """'What are these documents?' asks for content, not a file count."""
+    return bool(_WHAT_ARE_RE.search(message or ""))
+
+
 def inventory_kind(message: str) -> str | None:
     """Deterministic library inventory: prescriptions, invoices, notes, or all documents."""
+    if asks_what_documents_are(message):
+        return None
     if not _INVENTORY_RE.search(message):
         return None
     if not all(t in _LIBRARY_WORDS for t in query_terms(message)):
@@ -89,7 +102,7 @@ def is_library_overview(message: str) -> bool:
     These are answered from the same library Drive lists. Semantic search looks
     for a passage about the question and then declines when none exists.
     """
-    return bool(_OVERVIEW_RE.search(message or ""))
+    return asks_what_documents_are(message) or bool(_OVERVIEW_RE.search(message or ""))
 
 
 _TAG_RE = re.compile(r"<\s*/?\s*(document|system|assistant|user|developer|instructions?)\b[^>]*>", re.I)

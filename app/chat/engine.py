@@ -278,20 +278,19 @@ async def _library_overview(inp: ChatInput, started: float) -> AsyncIterator[Eve
         yield Event("run.completed", {"mode": "answered", "usage": _Usage().as_dict(), "latencyMs": _ms(started)})
         return
 
+    explaining = guard.asks_what_documents_are(inp.message)
     lines = [
-        "Here are the most recent documents in this organisation.",
+        "Here is what these documents are."
+        if explaining
+        else "Here are the most recent documents in this organisation.",
         "",
-        "| Document | File | Summary |",
-        "| --- | --- | --- |",
     ]
-    for row in rows:
-        lines.append(
-            "| {title} | {filename} | {summary} |".format(
-                title=_cell(retrieval.document_title(row)),
-                filename=_cell(str(row.get("originalFilename") or "—")),
-                summary=_cell(str(row.get("summary") or "No summary stored yet.")),
-            )
-        )
+    for index, row in enumerate(rows, start=1):
+        title = retrieval.document_title(row)
+        filename = str(row.get("originalFilename") or "untitled file")
+        kind = str(row.get("kind") or "document").replace("_", " ")
+        summary = str(row.get("summary") or "").strip() or "No extracted summary is stored yet."
+        lines.append(f"{index}. **{title}** ({filename}) — {kind}. {summary}")
     extra = overview["totalReady"] - len(rows)
     if extra > 0:
         lines.extend(["", f"…and {extra} more ready documents."])
@@ -316,7 +315,7 @@ async def _library_overview(inp: ChatInput, started: float) -> AsyncIterator[Eve
                 "page": None,
                 "quote": retrieval.document_title(row),
                 "filename": row.get("originalFilename"),
-                "kind": "document",
+                "kind": row.get("kind") or "document",
                 "projectId": row.get("projectId"),
             },
         )
